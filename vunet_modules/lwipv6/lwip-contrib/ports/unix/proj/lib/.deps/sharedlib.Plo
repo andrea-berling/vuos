@@ -1,0 +1,3 @@
+sharedlib.lo: sharedlib.c /usr/include/stdc-predef.h
+
+/usr/include/stdc-predef.h:
