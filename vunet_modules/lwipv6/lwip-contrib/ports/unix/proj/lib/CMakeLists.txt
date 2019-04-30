@@ -1,7 +1,7 @@
 # created on 2019-04-28 using the following SO answer:
 # https://stackoverflow.com/questions/17511496/how-to-create-a-shared-library-with-cmake
 cmake_minimum_required(VERSION 3.8)
-project(lwipv6 VERSION 1.5 DESCRIPTION "A lightweight TCP/IP stack (contrib)")
+project(lwipv6 VERSION 1.5 DESCRIPTION "A lightweight TCP/IP stack")
 
 set(PROJECT_VERSION "1.5")
 set(CONTRIBDIR "../../../..")
@@ -56,8 +56,8 @@ add_library(lwipv6 SHARED
 	${LWIPDIR}/netif/etharp.c
     # ARCHFILES
     ${LWIPARCH}/sys_arch_pipe.c
-    ${LWIPARCH}/sys_arch.2sem.c
-    ${LWIPARCH}/sys_arch.c
+    #${LWIPARCH}/sys_arch.2sem.c
+    #${LWIPARCH}/sys_arch.c
     ${LWIPARCH}/netif/vdeif.c
     ${LWIPARCH}/netif/slirpif.c
     ${LWIPARCH}/netif/tapif.c
@@ -73,7 +73,8 @@ add_library(lwipv6 SHARED
 	${LWIPFILTERDIR}/nat/nat_track_proto_generic.c
     # RADVFILES
     ${LWIPRADVDIR}/radvconf.c
-    sharedlib.c
+    #sharedlib.c
+    unixlib.c
     )
  
 set_target_properties(lwipv6    PROPERTIES VERSION ${PROJECT_VERSION}
@@ -85,3 +86,6 @@ include(GNUInstallDirs)
 install(TARGETS lwipv6
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+configure_file(lwipv6.pc.in lwipv6.pc @ONLY)
+install(FILES ${CMAKE_BINARY_DIR}/lwipv6.pc DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/pkgconfig)
