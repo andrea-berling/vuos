@@ -1,0 +1,12 @@
+prefix=/usr
+exec_prefix=/usr
+libdir=${exec_prefix}//usr/lib
+includedir=${prefix}/include
+
+Name: lwipv6
+Description: A lightweight TCP/IP stack
+Version: 1.5
+
+Requires:
+Libs: -L${libdir} -llwipv6
+Cflags: -I${includedir}

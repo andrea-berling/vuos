@@ -64,6 +64,7 @@ static int vunetlwipv6_ioctlparms(int fd, int req, struct vunet *nethandle)
 }
 #endif
 
+#if 0 /* temporarily disabled */
 static int vunetlwipv6_ioctl(int d, unsigned long request, void *arg)
 {
 	if (request == SIOCGIFCONF) {
@@ -83,6 +84,7 @@ static int vunetlwipv6_ioctl(int d, unsigned long request, void *arg)
 	}
 	return lwip_ioctl(d,request,arg);
 }
+#endif
 
 static int vunetlwipv6_socket(int domain, int type, int protocol){
 	struct stack *s= vunet_get_private_data();
@@ -266,30 +268,31 @@ typedef ssize_t (*ssizefun)();
 
 struct vunet_operations vunet_ops={
 	.socket=vunetlwipv6_socket,
-	.ioctl=vunetlwipv6_ioctl,
+	//.ioctl=vunetlwipv6_ioctl,
+	VUNETLWIPV6(ioctl),
 	//.ioctlparms=vunetlwipv6_ioctlparms,
 	.init=vunetlwipv6_init,
 	.fini=vunetlwipv6_fini,
-	.supported_domain=vunetlwipv6_supported_domain
-	VUNETLWIPV6(bind);
-	VUNETLWIPV6(connect);
-	VUNETLWIPV6(listen);
-	//VUNETLWIPV6(accept4);
-	VUNETLWIPV6(getsockname);
-	VUNETLWIPV6(getpeername);
-	//VUNETLWIPV6S(sendmsg);
-	//VUNETLWIPV6S(recvmsg);
-	//VUNETLWIPV6S(sendto);
-	//VUNETLWIPV6S(recvfrom);
-	VUNETLWIPV6S(sendmsg);
-	VUNETLWIPV6S(recvmsg);
-	UMNETLWIPV6(shutdown);
-	VUNETLWIPV6(getsockopt);
-	VUNETLWIPV6(setsockopt);
-	//VUNETLWIPV6S(read);
-	//VUNETLWIPV6S(write);
-	VUNETLWIPV6(close);
-	//VUNETLWIPV6(event_subscribe);
+	.supported_domain=vunetlwipv6_supported_domain,
+	VUNETLWIPV6(bind),
+	VUNETLWIPV6(connect),
+	VUNETLWIPV6(listen),
+	//VUNETLWIPV6(accept4),
+	VUNETLWIPV6(getsockname),
+	VUNETLWIPV6(getpeername),
+	//VUNETLWIPV6S(sendmsg),
+	//VUNETLWIPV6S(recvmsg),
+	//VUNETLWIPV6S(sendto),
+	//VUNETLWIPV6S(recvfrom),
+	VUNETLWIPV6S(sendmsg),
+	VUNETLWIPV6S(recvmsg),
+	VUNETLWIPV6(shutdown),
+	VUNETLWIPV6(getsockopt),
+	VUNETLWIPV6(setsockopt),
+	//VUNETLWIPV6S(read),
+	//VUNETLWIPV6S(write),
+	VUNETLWIPV6(close)
+	//VUNETLWIPV6(event_subscribe),
 };
 
 #if 0
