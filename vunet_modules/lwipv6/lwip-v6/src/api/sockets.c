@@ -54,15 +54,14 @@
 
 #include <linux/limits.h>
 #include <sys/types.h>
-#include <sys/epoll.h>
 #include <sys/stat.h>
 #include <sys/select.h>
-#include <poll.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <limits.h>
 #include <poll.h>
 #include <vpoll.h>
+#include <sys/epoll.h>
 #include <sys/eventfd.h>
 
 #include "lwip/opt.h"
@@ -335,6 +334,7 @@ alloc_socket(struct netconn *newconn,u16_t family)
 				} 
 				this->fdfake=fd;
                 this->efd = vpoll_create(0,EFD_CLOEXEC);
+                vpoll_ctl(this->efd,VPOLL_CTL_ADDEVENTS,EPOLLOUT); /* TCP send buf is empty, ok to send */
 				set_lwip_sockmap(fd,i);
 				return fd;
 			}
@@ -1358,7 +1358,7 @@ event_callback(struct netconn *conn, enum netconn_evt evt, u16_t len)
 
     int events = EPOLLIN * (sock->rcvevent || sock->lastdata || sock->conn->recv_avail) + EPOLLOUT *
         sock->sendevent;
-    vpoll_ctl(sock->efd,VPOLL_CTL_ADDEVENTS,events);
+    vpoll_ctl(sock->efd,VPOLL_CTL_SETEVENTS,events);
     
 	//printf("EVENT fd %d(%d) R%d S%d\n",s,evt,sock->rcvevent,sock->sendevent);
 	sys_sem_signal(selectsem);
@@ -2273,137 +2273,115 @@ void lwip_pipecb(int *fdp)
 
 #define TS_TO_MS(x) ((x) ? ((x)->tv_sec*1000 + (x)->tv_nsec/1000000) : -1)
 
-#if 0
-typedef struct socket_discriminator {
-    int fd;
-    int real_fd;
-} socket_discriminator;
-#endif
+int interesting_fd(int fd, fd_set *readset, fd_set *writeset, fd_set *exceptset)
+{
+    return (readset && FD_ISSET(fd,readset)) || (writeset && FD_ISSET(fd,writeset)) || (exceptset &&
+            FD_ISSET(fd,exceptset));
+}
 
 int lwip_pselect(int maxfdp1, fd_set *readset, fd_set *writeset, fd_set *exceptset,
 		const struct timespec *timeout, const sigset_t *sigmask)
 {
 	int i;
 	int rv;
-       // ,count;
-	//short *events;
-	//short revents=0;
 	struct lwip_socket *p_sock;
     int epfd;
     struct epoll_event revents[maxfdp1];
-    int newmaxfdp1 = maxfdp1;
+    memset(revents,-1,maxfdp1*sizeof(struct epoll_event));
     epfd = epoll_create1(EPOLL_CLOEXEC);
+    // Errors from epoll are not "translated" into errors for pselect. Should probably fix this
+    if (epfd == -1)
+        return -1;
     for (i=0;i<maxfdp1;i++) {
-        //LWIP_DEBUGF(SOCKETS_DEBUG, ("Loop 1, file descriptor number %d\n",i));
-        struct epoll_event ev;
-        ev.events = 0;
+        struct epoll_event ev = {0};
         if (readset && FD_ISSET(i,readset)) ev.events |= EPOLLIN;
         if (writeset && FD_ISSET(i,writeset)) ev.events |= EPOLLOUT;
         if (exceptset && FD_ISSET(i,exceptset)) ev.events |= EPOLLPRI;
-        //LWIP_DEBUGF(SOCKETS_DEBUG, ("ev.events = %d\n",ev.events));
         if (ev.events)
         {
             int fd = i;
+            ev.data.fd = fd;
             if ((p_sock=get_socket(i))!=NULL) 
-            {
                 fd = p_sock->efd;
-                newmaxfdp1 = (p_sock->efd > newmaxfdp1) ? (p_sock->efd + 1) : newmaxfdp1;
-            }
-            //ev.data.ptr = sd;
-            //LWIP_DEBUGF(SOCKETS_DEBUG, ("data.ptr = %p\n",ev.data.ptr));
-            /*
-               Fri 07 Jun 2019 11:09:53 AM CEST
-               No checks on errors
-               */
-            epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev);
+            if ((epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev)) == -1)
+                return -1;
         }
-        /*
-           if (events) {
-           revents |= lwip_event_subscribe(lwip_pipecb,fdp,i,events);
-           FD_CLR(i,&lwriteset);
-           }
-           */
     }
     
-    rv = epoll_pwait(epfd,revents,newmaxfdp1,TS_TO_MS(timeout),sigmask);
-    /*
-	if (revents)
-		rv=pselect(newmaxp1,&lreadset,&lwriteset,&lexceptset,&now,sigmask);
-	else
-		rv=pselect(newmaxp1,&lreadset,&lwriteset,&lexceptset,timeout,sigmask);
-*/
-    /*
-     * Fri 07 Jun 2019 11:49:11 AM CEST
-     * TODO check that the right number of events in returned
-     * */
-	/*count=0;*/
+    rv = epoll_pwait(epfd,revents,maxfdp1,TS_TO_MS(timeout),sigmask);
 
-	LWIP_DEBUGF(SOCKETS_DEBUG, ("Stopped waiting\n"));
-	for (i=0;i<newmaxfdp1;i++) {
-        LWIP_DEBUGF(SOCKETS_DEBUG, ("Loop 2, file descriptor number %d\n",i));
-        LWIP_DEBUGF(SOCKETS_DEBUG, ("EPOLLIN = %d\n",revents[i].events & EPOLLIN));
-        LWIP_DEBUGF(SOCKETS_DEBUG, ("EPOLLOUT = %d\n",revents[i].events & EPOLLOUT));
-        LWIP_DEBUGF(SOCKETS_DEBUG, ("EPOLLPRI = %d\n",revents[i].events & EPOLLPRI));
-		if ((p_sock = get_socket(i)) != NULL)
+    if (rv == -1)
+        return -1;
+
+    int handled[maxfdp1];
+    memset(handled,0,maxfdp1*sizeof(int));
+	for (i=0;i<maxfdp1;i++) {
+        int fd = revents[i].data.fd;
+        if (fd > -1)
         {
-            int efd = p_sock->efd;
-            LWIP_DEBUGF(SOCKETS_DEBUG, ("efd = %d\n",efd));
-            if (revents[efd].events)
+            handled[fd] = 1;
+            LWIP_DEBUGF(SOCKETS_DEBUG, ("Fd with event\n"));
+            LWIP_DEBUGF(SOCKETS_DEBUG, ("i value: %d\n",i));
+            LWIP_DEBUGF(SOCKETS_DEBUG, ("File descriptor number %d\n",fd));
+            LWIP_DEBUGF(SOCKETS_DEBUG, ("EPOLLIN = %d\n",revents[i].events & EPOLLIN));
+            LWIP_DEBUGF(SOCKETS_DEBUG, ("EPOLLOUT = %d\n",revents[i].events & EPOLLOUT));
+            LWIP_DEBUGF(SOCKETS_DEBUG, ("EPOLLPRI = %d\n",revents[i].events & EPOLLPRI));
+            if ((p_sock = get_socket(fd)) != NULL)
             {
+                LWIP_DEBUGF(SOCKETS_DEBUG, ("It's a lwip_socket\n"));
                 if (readset) 
                 {
-                    if (FD_ISSET(i,readset))
-                        if (revents[efd].events & EPOLLIN)
-                            vpoll_ctl(efd,VPOLL_CTL_DELEVENTS,EPOLLIN);
-                        else
-                            FD_CLR(i,readset);
+                    if (FD_ISSET(fd,readset) && !(revents[i].events & EPOLLIN))
+                        FD_CLR(fd,readset);
                 }
                 if (writeset) 
                 {
-                    if (FD_ISSET(i,writeset))
-                        if (revents[efd].events & EPOLLOUT)
-                            vpoll_ctl(efd,VPOLL_CTL_DELEVENTS,EPOLLOUT);
-                        else
-                            FD_CLR(i,writeset);
+                    if (FD_ISSET(fd,writeset) && !(revents[i].events & EPOLLOUT))
+                        FD_CLR(fd,writeset);
                 }
                 if (exceptset) 
                 {
-                    if (FD_ISSET(i,exceptset))
-                        if (revents[efd].events & EPOLLPRI)
-                            vpoll_ctl(efd,VPOLL_CTL_DELEVENTS,EPOLLPRI);
-                        else
-                            FD_CLR(i,exceptset);
+                    if (FD_ISSET(fd,exceptset) && !(revents[i].events & EPOLLPRI))
+                        FD_CLR(fd,exceptset);
                 }
             }
             else
             {
-                if(readset && FD_ISSET(i,readset))
-                    FD_CLR(i,readset);
-                if(writeset && FD_ISSET(i,writeset))
-                    FD_CLR(i,writeset);
-                if(exceptset && FD_ISSET(i,exceptset))
-                    FD_CLR(i,exceptset);
+                LWIP_DEBUGF(SOCKETS_DEBUG, ("It's not a lwip_socket\n"));
+                if (readset)
+                {
+                    if (FD_ISSET(fd,readset) && !(revents[i].events & EPOLLIN))
+                        FD_CLR(fd,readset);
+                }
+                if (writeset)
+                {
+                    if (FD_ISSET(fd,writeset) && !(revents[i].events & EPOLLOUT))
+                        FD_CLR(fd,writeset);
+                }
+                if (exceptset)
+                {
+                    if (FD_ISSET(fd,exceptset) && !(revents[i].events & EPOLLPRI))
+                        FD_CLR(fd,exceptset);
+                }
             }
         }
-        else
+        if (interesting_fd(i,readset,writeset,exceptset) && !handled[i])
         {
-            if (readset) 
-            {
-                if (FD_ISSET(i,readset) && !(revents[i].events & EPOLLIN))
-                    FD_CLR(i,readset);
-            }
-            if (writeset) 
-            {
-                if (FD_ISSET(i,writeset) && !(revents[i].events & EPOLLOUT))
-                    FD_CLR(i,writeset);
-            }
-            if (exceptset) 
-            {
-                if (FD_ISSET(i,exceptset) && !(revents[i].events & EPOLLPRI))
-                    FD_CLR(i,exceptset);
-            }
+            LWIP_DEBUGF(SOCKETS_DEBUG, ("Registered fd with no events\n"));
+            LWIP_DEBUGF(SOCKETS_DEBUG, ("i value: %d\n",i));
+            LWIP_DEBUGF(SOCKETS_DEBUG, ("EPOLLIN = %d\n",revents[i].events & EPOLLIN));
+            LWIP_DEBUGF(SOCKETS_DEBUG, ("EPOLLOUT = %d\n",revents[i].events & EPOLLOUT));
+            LWIP_DEBUGF(SOCKETS_DEBUG, ("EPOLLPRI = %d\n",revents[i].events & EPOLLPRI));
+            if (readset && FD_ISSET(i,readset)) 
+                FD_CLR(i,readset);
+            if (writeset && FD_ISSET(i,writeset))
+                FD_CLR(i,writeset);
+            if (exceptset && FD_ISSET(i,exceptset))
+                FD_CLR(i,exceptset);
         }
 	}
+
+    close(epfd);
 
 	return rv;
 }
@@ -2505,51 +2483,64 @@ static int lwip_pollmerge(struct pollfd *fds, nfds_t nfds, struct pollfd *rfds)
 
 int lwip_ppoll(struct pollfd *fds, nfds_t nfds,
 		const struct timespec *timeout, const sigset_t *sigmask) {
-	int i;
-	int rv,count;
-	short *events;
-	short revents=0;
-	int fdp[2];
-	struct timespec now={0,0};
-	int indexpipe=-1;
-	int substitutedbypipe;
-	pipe(fdp);
-	events=alloca(nfds*sizeof(short));
+	int i,j;
+	int rv;
+	struct epoll_event *revents = alloca(nfds*sizeof(struct epoll_event));
+    memset(revents,-1,nfds*sizeof(struct epoll_event));
+    LWIP_DEBUGF(SOCKETS_DEBUG, ("revents[%d] = {fd: %d, events: %x}\n",0,revents[0].data.fd,revents[0].events));
+    LWIP_DEBUGF(SOCKETS_DEBUG, ("revents[%d] = {fd: %d, events: %x}\n",1,revents[1].data.fd,revents[1].events));
+    struct lwip_socket *p_sock;
+    int epfd;
+    epfd = epoll_create1(EPOLL_CLOEXEC);
+    // Errors from epoll are not "translated" into errors for ppoll. Should probably fix this
+    if (epfd < 0)
+        return -1;
 	for (i=0;i<nfds;i++) {
-		struct lwip_socket *p_sock;
-		if (fds[i].events && ((p_sock=get_socket(fds[i].fd))!=NULL)) {
-			events[i]=fds[i].events;
-			revents |= 
-				fds[i].revents=lwip_event_subscribe(lwip_pipecb,fdp,fds[i].fd,events[i]);
-			if (indexpipe<0) {
-				indexpipe=i;
-				substitutedbypipe=fds[i].fd;
-				fds[i].fd=fdp[0];
-			}
-			fds[i].events=POLLIN;
-		} else 
-			events[i]=0;
-	}
-	if (revents)
-		rv=ppoll(fds,nfds,&now,sigmask);
-	else
-		rv=ppoll(fds,nfds,timeout,sigmask);
-	count=0;
-	for (i=0;i<nfds;i++) {
-		for (i=0;i<nfds;i++) {
-			if (events[i]) {
-				if (i==indexpipe)
-					fds[i].fd=substitutedbypipe;
-				fds[i].events=events[i];
-				fds[i].revents=lwip_event_subscribe(NULL,fdp,fds[i].fd,events[i]);
-			}
-			if(fds[i].revents)
-				count++;
+		if (fds[i].fd > -1 && fds[i].events) {
+            struct epoll_event ev = {0};
+            int fd = fds[i].fd;
+            if ((p_sock=get_socket(fds[i].fd))!=NULL)
+                fd = p_sock->efd;
+			ev.data.fd = fd;
+            ev.events = 0;
+            if (fds[i].events & POLLIN)
+                ev.events |= EPOLLIN;
+            if (fds[i].events & POLLOUT)
+                ev.events |= EPOLLOUT;
+            if (fds[i].events & POLLPRI)
+                ev.events |= EPOLLPRI;
+            if ((epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev)) == -1)
+                return -1;
 		}
 	}
-	close(fdp[0]);
-	close(fdp[1]);
-	return (rv>=0)?count:rv;
+
+    rv = epoll_pwait(epfd,revents,nfds,TS_TO_MS(timeout),sigmask);
+
+    if (rv < 0)
+        return -1;
+	for (i=0;i<nfds;i++) {
+        LWIP_DEBUGF(SOCKETS_DEBUG, ("revents[%d] = {fd: %d, events: %x}\n",i,revents[i].data.fd,revents[i].events));
+        int fd = fds[i].fd;
+        if ((p_sock = get_socket(fds[i].fd)) != NULL)
+            fd = p_sock->efd;
+		if (fd > -1) {
+            for (j=0;j<nfds;j++) {
+                if (revents[j].data.fd == fd)
+                {
+                    if (revents[j].events & EPOLLIN)
+                        fds[i].revents |= POLLIN;
+                    if (revents[j].events & EPOLLOUT)
+                        fds[i].revents |= POLLOUT;
+                    if (revents[j].events & EPOLLPRI)
+                        fds[i].revents |= POLLPRI;
+                }
+            }
+        }
+	}
+
+    close(epfd);
+
+	return rv;
 }
 
 int lwip_poll(struct pollfd *fds, nfds_t nfds, int timeout) {
