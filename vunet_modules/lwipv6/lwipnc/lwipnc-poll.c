@@ -14,6 +14,7 @@
 #include <sys/select.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <poll.h>
 
 #define BUFSIZE 1024
 char buf[BUFSIZE];
@@ -68,24 +69,25 @@ int main(int argc,char *argv[])
     exit(-1);
   }
   while(1) {
-    fd_set rfds;
+    struct pollfd fds[2];
+    memset(fds,0,2*sizeof(struct pollfd));
     int n;
-    FD_ZERO(&rfds);
-    FD_SET(STDIN_FILENO,&rfds);
-    FD_SET(fd,&rfds);
+    fds[0].fd = STDIN_FILENO;
+    fds[0].events = POLLIN;
+    fds[1].fd = fd;
+    fds[1].events = POLLIN;
     /* wait for input both from stdin and from the socket */
     printf("Ready\n");
-    lwip_select(fd+1,&rfds,NULL,NULL,NULL);
+    lwip_poll(fds,2,-1);
     /* copy data from the socket to stdout */
-    printf("DEBUG: Out of the select...\n");
-    if(FD_ISSET(fd,&rfds)) {
+    if(fds[1].revents & POLLIN) {
       printf("DEBUG: Reading from the socket...\n");
       if((n=lwip_read(fd,buf,BUFSIZE)) == 0)
         exit(0);
       write(STDOUT_FILENO,buf,n);
     }
     /* copy data from stdin to the socket */
-    if(FD_ISSET(STDIN_FILENO,&rfds)) {
+    if(fds[0].revents & POLLIN) {
       printf("DEBUG: Writing to the socket...\n");
       if((n=read(STDIN_FILENO,buf,BUFSIZE)) == 0)
         exit(0);
