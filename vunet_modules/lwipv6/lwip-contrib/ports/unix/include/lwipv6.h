@@ -26,8 +26,9 @@
 #include <stdio.h>
 #include <stdlib.h>   /* timeval */ 
 #include <stdint.h>   /* uint32_t */ 
-#include <errno.h>   
-#include <sys/poll.h>   
+#include <errno.h>
+#include <sys/poll.h>
+#include <sys/epoll.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -193,6 +194,7 @@ int lwip_pselect(int maxfdp1, fd_set *readset, fd_set *writeset, fd_set *excepts
 int lwip_poll(struct pollfd *fds, nfds_t nfds, int timeout);
 int lwip_ppoll(struct pollfd *fds, nfds_t nfds,
 		const struct timespec *timeout, const sigset_t *sigmask);
+int lwip_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event);
 
 int lwip_ioctl(int s, long cmd, void *argp);
 int lwip_fcntl64(int s, int cmd, long arg);
@@ -276,6 +278,7 @@ lwiplongfun lwip_add_addr,
 			lwip_socket,
 			lwip_select,
 			lwip_pselect,
+			lwip_epoll_ctl,
 			lwip_poll,
 			lwip_ppoll,
 			lwip_ioctl,
@@ -335,6 +338,7 @@ static inline void *loadlwipv6dl()
 		{"lwip_write", &lwip_write},
 		{"lwip_select", &lwip_select},
 		{"lwip_pselect", &lwip_pselect},
+		{"lwip_epoll_ctl", &lwip_epoll_ctl},
 		{"lwip_poll", &lwip_poll},
 		{"lwip_ppoll", &lwip_ppoll},
 		{"lwip_ioctl", &lwip_ioctl},

@@ -2543,6 +2543,24 @@ int lwip_ppoll(struct pollfd *fds, nfds_t nfds,
 	return rv;
 }
 
+int lwip_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
+{
+    // Mon 10 Jun 2019 03:03:02 PM CEST
+    // No check is made on whether event != NULL. Should probably change that
+    if (epfd > -1 && fd > -1)
+    {
+        struct lwip_socket *p_sock = get_socket(fd);
+        if (p_sock != NULL)
+            fd = p_sock->efd;
+        return epoll_ctl(epfd,op,fd,event);
+    }
+    else
+    {
+        set_errno(EBADF);
+        return -1;
+    }
+}
+
 int lwip_poll(struct pollfd *fds, nfds_t nfds, int timeout) {
 	int rv;
 	struct timespec *ptimeout;
