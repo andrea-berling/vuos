@@ -1,4 +1,7 @@
-cmake_minimum_required(VERSION 2.6)
+cmake_minimum_required(VERSION 3.7)
+project("vuos")
+
+include(GNUInstallDirs)
 
 set(CMAKE_C_FLAGS
 		"-ggdb -Wall -Wextra -pedantic -std=gnu11 -Wno-unused-parameter")
@@ -16,16 +19,15 @@ set(VU_DYN_HEADER_PATH ${CMAKE_BINARY_DIR}/include)
  
 set(VU_SYSCALL_DEFS ${VU_DYN_HEADER_PATH}/syscall_defs.h)
 set(R_TABLE_H ${VU_DYN_HEADER_PATH}/r_table.h)
+set(VU_SYSNAMES ${VU_DYN_SOURCE_PATH}/syscall_names.c)
 set(VU_ARCHTABLE ${VU_DYN_SOURCE_PATH}/arch_table.c)
 set(VU_SYSTABLE ${VU_DYN_SOURCE_PATH}/syscall_table.c)
-set(VU_DYN_SOURCES ${VU_ARCHTABLE} ${VU_SYSTABLE})
+set(VU_DYN_SOURCES ${VU_SYSNAMES} ${VU_ARCHTABLE} ${VU_SYSTABLE})
 
-set(VU_DYN_SOURCE_MKDIR mkdir -p ${VU_DYN_SOURCE_PATH})
-execute_process(COMMAND ${VU_DYN_SOURCE_MKDIR})
+execute_process(COMMAND mkdir -p ${VU_DYN_SOURCE_PATH})
 
 foreach(DYN ${VU_DYN_SOURCES})
-	set(VU_DYN_SOURCE_CREATE touch -d 20000101 ${DYN})
-	execute_process(COMMAND ${VU_DYN_SOURCE_CREATE})
+	execute_process(COMMAND touch -d 20000101 ${DYN})
 endforeach(DYN)
 
 configure_file( ${VU_HEADERS}/config.h.in ${VU_DYN_HEADER_PATH}/config.h )
@@ -44,3 +46,4 @@ add_subdirectory(vubinfmt)
 add_subdirectory(vunet_modules)
 add_subdirectory(vufuse_modules)
 add_subdirectory(vudev_modules)
+add_subdirectory(man)
