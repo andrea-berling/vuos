@@ -127,8 +127,10 @@ void wo_socket(struct vuht_entry_t *ht, struct syscall_descriptor_t *sd) {
 void vw_msocket(struct vuht_entry_t *ht, struct syscall_descriptor_t *sd) {
 	if (ht)
 		wi_socket(ht, sd);
+	else if (sd->extra->statbuf.st_mode == 0)
+		sd->ret_value = -ENOENT;
 	else
-		sd->ret_value = -EINVAL;
+		sd->ret_value = -ENOTSUP;
 }
 
 static int socket_close_upcall(struct vuht_entry_t *ht, int sfd, void *private) {
@@ -701,10 +703,6 @@ void wi_getsockopt(struct vuht_entry_t *ht, struct syscall_descriptor_t *sd) {
 __attribute__((constructor))
 	static void init(void) {
 		vu_fnode_set_close_upcall(S_IFSOCK, socket_close_upcall);
-		set_wi_read(S_IFSOCK, wi_recvfrom);
-		set_wd_read(S_IFSOCK, wd_recvfrom);
-		set_wo_read(S_IFSOCK, wo_recvfrom);
-		set_wi_write(S_IFSOCK, wi_sendto);
-		set_wd_write(S_IFSOCK, wd_sendto);
-		set_wo_write(S_IFSOCK, wo_sendto);
+		multiplex_read_wrappers(S_IFSOCK, wi_recvfrom, wd_recvfrom, wo_recvfrom);
+		multiplex_write_wrappers(S_IFSOCK, wi_sendto, wd_sendto, wo_sendto);
 	}
