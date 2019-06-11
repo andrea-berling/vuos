@@ -1,1 +1,0 @@
-gcc -o vpolldemo fduserdata.c vpoll.c vpolldemo.c -I . -lpthread

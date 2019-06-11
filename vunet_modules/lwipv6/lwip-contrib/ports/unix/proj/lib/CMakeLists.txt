@@ -4,12 +4,6 @@ cmake_minimum_required(VERSION 3.8)
 project(lwipv6 VERSION 1.5 DESCRIPTION "A lightweight TCP/IP stack")
 
 set(PROJECT_VERSION "1.5")
-set(CONTRIBDIR "../../../..")
-set(LWIPDIR "${CONTRIBDIR}/../lwip-v6/src")
-set(LWIPARCH "${CONTRIBDIR}/ports/unix")
-set(LWIPFILTERDIR "${LWIPDIR}/userfilter")
-set(LWIPRADVDIR "${LWIPDIR}/radv")
-set(VPOLLDIR "${CONTRIBDIR}/../vpoll")
 
 include_directories(
     ${LWIPDIR}/include
@@ -77,20 +71,13 @@ add_library(lwipv6 SHARED
     ${LWIPRADVDIR}/radvconf.c
     #sharedlib.c
     unixlib.c
-    # VPOLLFILES
-    ${VPOLLDIR}/vpoll.c
-    ${VPOLLDIR}/fduserdata.c
     )
  
-set_target_properties(lwipv6    PROPERTIES VERSION ${PROJECT_VERSION}
-                                SOVERSION 1
-                                PUBLIC_HEADER ${LWIPARCH}/include/lwipv6.h)
+set_target_properties(lwipv6    PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION 1 PUBLIC_HEADER
+    ${LWIPARCH}/include/lwipv6.h)
 
-# TODO substitue with actual install destinations
-include(GNUInstallDirs)
+target_link_libraries(vpoll)
+
 install(TARGETS lwipv6
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-
-configure_file(lwipv6.pc.in lwipv6.pc @ONLY)
-install(FILES ${CMAKE_BINARY_DIR}/lwipv6.pc DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/pkgconfig)
+    LIBRARY DESTINATION ${INSTALL_LIBDIR}
+    PUBLIC_HEADER DESTINATION ${INSTALL_INCLUDEDIR})
