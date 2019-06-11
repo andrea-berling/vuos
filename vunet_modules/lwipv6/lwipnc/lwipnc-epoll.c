@@ -97,14 +97,12 @@ int main(int argc,char *argv[])
         {
             if ((revents[i].data.fd == STDIN_FILENO) && revents[i].events & POLLIN)
             {
-                printf("DEBUG: Writing to the socket...\n");
                 if((n=read(STDIN_FILENO,buf,BUFSIZE)) == 0)
                     exit(0);
                 lwip_write(fd,buf,n);
             }
             if ((revents[i].data.fd == fd) && revents[i].events & POLLIN)
             {
-                printf("DEBUG: Reading from the socket...\n");
                 if((n=lwip_read(fd,buf,BUFSIZE)) == 0)
                     exit(0);
                 write(STDOUT_FILENO,buf,n);

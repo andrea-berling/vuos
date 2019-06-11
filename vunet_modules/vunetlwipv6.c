@@ -223,7 +223,7 @@ static void lwipargtoenv(struct stack *s,char *initargs)
 }
 
 
-int vunetlwipv6_init (char *source, unsigned long flags, const char *args, void **private_data) {
+int vunetlwipv6_init (const char *source, unsigned long flags, const char *args, void **private_data) {
 	struct stack *s=lwip_stack_new();
 	if (s) {
 		lwipargtoenv(s,args);
@@ -263,35 +263,37 @@ int vunetlwipv6_supported_domain(int domain)
 
 typedef int (*intfun)();
 typedef ssize_t (*ssizefun)();
-#define VUNETLWIPV6(X) .X=(intfun)lwip_##X
-#define VUNETLWIPV6S(X) .X=(ssizefun)lwip_##X
+#define VUNETLWIPV6(X) .##X=(intfun)lwip_##X
+#define VUNETLWIPV6S(X) .##X=(ssizefun)lwip_##X
 
 struct vunet_operations vunet_ops={
 	.socket=vunetlwipv6_socket,
 	//.ioctl=vunetlwipv6_ioctl,
-	VUNETLWIPV6(ioctl),
+    .ioctl=lwip_ioctl,
+	//VUNETLWIPV6(ioctl),
 	//.ioctlparms=vunetlwipv6_ioctlparms,
 	.init=vunetlwipv6_init,
 	.fini=vunetlwipv6_fini,
 	.supported_domain=vunetlwipv6_supported_domain,
-	VUNETLWIPV6(bind),
-	VUNETLWIPV6(connect),
-	VUNETLWIPV6(listen),
-	//VUNETLWIPV6(accept4),
-	VUNETLWIPV6(getsockname),
-	VUNETLWIPV6(getpeername),
+	.bind = lwip_bind,
+	.connect = lwip_connect,
+	.listen = lwip_listen,
+	//.accept4 = lwip_accept4,
+	.getsockname = lwip_getsockname,
+	.getpeername = lwip_getpeername,
 	//VUNETLWIPV6S(sendmsg),
 	//VUNETLWIPV6S(recvmsg),
 	//VUNETLWIPV6S(sendto),
 	//VUNETLWIPV6S(recvfrom),
-	VUNETLWIPV6S(sendmsg),
-	VUNETLWIPV6S(recvmsg),
-	VUNETLWIPV6(shutdown),
-	VUNETLWIPV6(getsockopt),
-	VUNETLWIPV6(setsockopt),
+	.sendmsg = lwip_sendmsg,
+	.recvmsg = lwip_recvmsg,
+	.shutdown = lwip_shutdown,
+	.getsockopt = lwip_getsockopt,
+	.setsockopt = lwip_setsockopt,
 	//VUNETLWIPV6S(read),
 	//VUNETLWIPV6S(write),
-	VUNETLWIPV6(close)
+	.close = lwip_close,
+	.epoll_ctl = lwip_epoll_ctl,
 	//VUNETLWIPV6(event_subscribe),
 };
 

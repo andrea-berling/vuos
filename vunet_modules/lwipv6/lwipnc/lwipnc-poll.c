@@ -81,14 +81,12 @@ int main(int argc,char *argv[])
     lwip_poll(fds,2,-1);
     /* copy data from the socket to stdout */
     if(fds[1].revents & POLLIN) {
-      printf("DEBUG: Reading from the socket...\n");
       if((n=lwip_read(fd,buf,BUFSIZE)) == 0)
         exit(0);
       write(STDOUT_FILENO,buf,n);
     }
     /* copy data from stdin to the socket */
     if(fds[0].revents & POLLIN) {
-      printf("DEBUG: Writing to the socket...\n");
       if((n=read(STDIN_FILENO,buf,BUFSIZE)) == 0)
         exit(0);
       lwip_write(fd,buf,n);
