@@ -14,3 +14,4 @@ foreach(VUNET_MOD ${VUNET_MODULES})
 endforeach(VUNET_MOD)
 
 target_link_libraries(vunetvdestack vdeplug)
+add_subdirectory(lwipv6)
