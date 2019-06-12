@@ -138,12 +138,17 @@ static void ifaddname(struct ifname **head,char type,char num,char *name)
 static void myputenv(struct ifname **head, int *intnum, char *paramval[], char *arg)
 {
 	int i;
+    /* For each interface type */
 	for (i=0;i<INTTYPES;i++) {
+        /* If a supported interface + a digit has been supplied */
 		if (strncmp(arg,intname[i],2)==0 && arg[2] >= '0' && arg[2] <= '9') {
+            /* If a named interface has been supplied */
 			if (arg[3] == '=') {
+                /* Add the given interface to head */
 				ifaddname(head, i,arg[2]-'0',arg+4);
 				if (arg[2]-'0'+1 > intnum[i]) intnum[i]=arg[2]-'0'+1;
 			}
+            /* Else just change the number of the supplied interface type, if needed */
 			else if (arg[3] == 0) {
 				if (arg[2]-'0' > intnum[i]) intnum[i]=arg[2]-'0';
 			}
@@ -151,6 +156,8 @@ static void myputenv(struct ifname **head, int *intnum, char *paramval[], char *
 		}
 	}
 
+    /* If a parameter has been supplied, set paramval[i] pointer to the value of the given parameter
+     * */
 	for (i=0;i<PARAMTYPES;i++) {
 		if (strncmp(arg,paramname[i],2)==0) {
 			if (arg[2] == '=') {
@@ -177,32 +184,53 @@ static void lwipargtoenv(struct stack *s,char *initargs)
 
 	if (initargs==0 || *initargs == 0) initargs=stdargs;
 	if (strcmp(initargs,"lo") != 0) {
+        /* Until we reach the end of the initargs string */
 		while (*initargs != 0) {
+            /* Position next and unquoted at the position pointed by initargs of the input string */
 			next=initargs;
 			unquoted=initargs;
-			while ((*next != ',' || quoted) && *next != 0) {
-				*unquoted=*next;
-				if (*next == quoted)
-					quoted=0;
-				else if (*next == '\'' || *next == '\"')
-					quoted=*next;
-			else
-				unquoted++;
-			next++;
-			}
+            /* Up until we reach a comma or a quoting sign, as long as we have not reached the end */
+            while ((*next != ',' || quoted) && *next != 0) {
+                /* Save the character pointed by next in the unquoted string at the position pointed
+                 * by unquoted */
+                *unquoted=*next;
+                /* If we reached the second quoting, turn off the quote flag */
+                if (*next == quoted)
+                    quoted=0;
+                /* If we reach the first quoting, turn on the quote flag, setting it to the quote
+                 * sign */
+                else if (*next == '\'' || *next == '\"')
+                    quoted=*next;
+                else
+                /* Proceed on the unquoted string*/
+                    unquoted++;
+                /* Proceed on the initargs string */
+                next++;
+            }
 			if (*next == ',') {
 				*unquoted=*next=0;
 				next++;
 			}
+            /* At this point , we have found a string between two commas, which may be quoted, and
+             * we have set the comma character with a NULL byte. We have also set next to the next
+             * character, to resume later on.  Standard C programs will see the initargs string as a
+             * shorter string than the input string, with only the first parameter */
 			if (*initargs != 0)
 				myputenv(&ifh,intnum,paramval,initargs);
+            /*
+             * If we have not finished the input string, we put the found parameter in the env with
+             * myputenv, and then we start all over again from next
+             * */
 			initargs=next;
 		}
 		/* load interfaces */
+        /* count the interfaces */
 		for (i=0;i<INTTYPES;i++)
 			totint+=intnum[i];
+        /* at least one */
 		if (totint==0)
 			intnum[0]=1;
+        /* For each type of interface, try to add it to the stack */
 		for (j=0;j<intnum[0];j++) {
 			if (lwip_vdeif_add(s,ifname(ifh,0,j)) == NULL) 
 				fprintf(stderr,"vunetlwip: vd[%d] configuration error\n",j);
