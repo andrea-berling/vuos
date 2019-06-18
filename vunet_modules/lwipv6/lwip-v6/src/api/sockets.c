@@ -1056,6 +1056,10 @@ lwip_msocket(struct stack *stack, int domain, int type, int protocol)
 	struct netconn *conn;
 	int i;
 
+    /* Temporary solution: ignore the SOCK_CLOEXEC flag in type */
+    if (type & SOCK_CLOEXEC)
+        type &= ~SOCK_CLOEXEC;
+
 	if (stack==NULL) {
 		set_errno(ENONET);
 		return -1;
