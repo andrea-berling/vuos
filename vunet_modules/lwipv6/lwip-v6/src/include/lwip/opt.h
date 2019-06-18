@@ -662,7 +662,7 @@ a lot of data that needs to be copied, this should be set high. */
 
 
 #ifndef SOCKETS_DEBUG
-#define SOCKETS_DEBUG                   DBG_OFF
+#define SOCKETS_DEBUG                   DBG_ON
 #endif
 
 #ifndef INET_DEBUG
@@ -722,7 +722,7 @@ a lot of data that needs to be copied, this should be set high. */
 #endif
 
 #ifndef TCPIP_DEBUG
-#define TCPIP_DEBUG                     DBG_OFF
+#define TCPIP_DEBUG                     DBG_ON
 #endif
 
 #ifndef LWSLIRP_DEBUG

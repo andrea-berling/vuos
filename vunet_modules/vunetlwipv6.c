@@ -268,14 +268,6 @@ int vunetlwipv6_fini (void *private_data){
 	return 0;
 }
 
-#if 0
-int vunetlwipv6_event_subscribe(voidfun cb, void *arg, int fd, int how)
-{
-	//printk("vunetlwipv6_event_subscribe %d %d\n",fd,how);
-	return lwip_event_subscribe(cb,arg,fd,how);
-}
-#endif
-
 int vunetlwipv6_supported_domain(int domain)
 {
 	switch(domain) {
@@ -288,11 +280,6 @@ int vunetlwipv6_supported_domain(int domain)
 			return 0;
 	}
 }
-
-typedef int (*intfun)();
-typedef ssize_t (*ssizefun)();
-#define VUNETLWIPV6(X) .##X=(intfun)lwip_##X
-#define VUNETLWIPV6S(X) .##X=(ssizefun)lwip_##X
 
 struct vunet_operations vunet_ops={
 	.socket=vunetlwipv6_socket,
