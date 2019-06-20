@@ -63,6 +63,8 @@
 #include <vpoll.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <fduserdata.h>
+#include <pthread.h>
 
 #include "lwip/opt.h"
 #include "lwip/api.h"
@@ -127,7 +129,7 @@ struct lwip_socket {
 	u16_t rcvevent;
 	u16_t sendevent;
 	u16_t  flags;
-	int fdfake;
+//	int fdfake;
     int efd;
 	int err;
 };
@@ -135,14 +137,15 @@ struct lwip_socket {
 #define SOCK_ROK(s) ((((s)->flags & O_ACCMODE) + 1) & 1)
 #define SOCK_WOK(s) ((((s)->flags & O_ACCMODE) + 1) & 2)
 
-static struct lwip_socket **sockets=NULL;
-static int sockets_len=0;
+//static struct lwip_socket **sockets=NULL;
+//static int sockets_len=0;
+FDUSERDATA *sockets_table;
 
 #if LWIP_NL
 #define NOT_CONN_SOCKET ((struct netconn *)(-1))
 #endif
 
-static sys_sem_t socksem = 0;
+//static sys_sem_t socksem = 0;
 static sys_sem_t selectsem = 0;
 
 static u16_t so_map[]={
@@ -251,24 +254,32 @@ static int set_lwip_sockmap(int s,short index)
 	lwip_sockmap[s]=index;
 }
 
+    static void
+done_with_socket(struct lwip_socket *sock)
+{
+    if (sock)
+    {
+        LWIP_DEBUGF(SOCKETS_DEBUG, ("[%d:%d]: done_with_socket(%d)\n",getpid(),pthread_self(),sock->efd));
+        //LWIP_DEBUGF(SOCKETS_DEBUG, ("done_with_socket(%d)\n", sock->efd));
+        fduserdata_put(sock);
+    }
+}
+
 	static struct lwip_socket *
 get_socket(int s)
 {
-	struct lwip_socket *sock;
-	int index=get_lwip_sockmap(s);
+    LWIP_DEBUGF(SOCKETS_DEBUG, ("[%d:%d]: get_socket(%d)\n",getpid(),pthread_self(),s));
+    struct lwip_socket *sock = fduserdata_get(sockets_table,s);
 
-	if ((index < 0) || (index >= sockets_len)) {
+	if (sock == NULL) {
 		LWIP_DEBUGF(SOCKETS_DEBUG, ("get_socket(%d): invalid\n", s));
 		set_errno(EBADF);
-		return NULL;
 	}
-
-	sock = sockets[index];
-
-	if (!sock->conn) {
+    else if (!sock->conn) {
 		LWIP_DEBUGF(SOCKETS_DEBUG, ("get_socket(%d): not active\n", s));
+        done_with_socket(sock);
 		set_errno(EBADF);
-		return NULL;
+        return NULL;
 	}
 
 	return sock;
@@ -278,13 +289,28 @@ extern int socket(int domain, int type, int protocol);
 	static int
 alloc_socket(struct netconn *newconn,u16_t family)
 {
-	int i,fd;
 	struct lwip_socket *this;
 
+#if 0
 	if (!socksem)
 		socksem = sys_sem_new(1);
+#endif
+    if (sockets_table == NULL)
+    {
+        sockets_table = fduserdata_create(SOCK_TABLE_SIZE); // Add SOCK_TABLE_SIZE to opt.h
+        if (sockets_table == NULL)
+        {
+            set_errno(ENOMEM);
+            return -1;
+        }
+    }
 
-	this=mem_malloc(sizeof(struct lwip_socket));
+    int efd;
+    efd = vpoll_create(0,EFD_CLOEXEC);
+    if (efd < 0)
+        return -1;
+
+	this=fduserdata_new(sockets_table,efd,struct lwip_socket);
 	if (!this) {
 		set_errno(ENOMEM);
 		return -1;
@@ -297,12 +323,18 @@ alloc_socket(struct netconn *newconn,u16_t family)
 		this->sendevent = 1; /* TCP send buf is empty */
 		this->flags = O_RDWR;
 		this->err = 0;
+        this->efd = efd;
+        // TODO remember to write lwip_stat/lwip_fstat
+        // TODO rember to change select, poll, epoll_ctl as well
 
 		/* Protect socket array */
-		sys_sem_wait(socksem);
+		//sys_sem_wait(socksem);
 
-		/* allocate a new socket identifier */
-		for(i = 0; 1 ; ++i) {
+		/* Create the sockets_table, if not already created */
+        vpoll_ctl(this->efd,VPOLL_CTL_ADDEVENTS,EPOLLOUT); /* TCP send buf is empty, ok to send */
+        done_with_socket(this);
+        return efd;
+#if 0
 			if (i >= sockets_len) {
 				int newlen=sockets_len+NUM_SOCKETS;
 				struct lwip_socket **newsockets;
@@ -316,7 +348,9 @@ alloc_socket(struct netconn *newconn,u16_t family)
 				for (;sockets_len<newlen;sockets_len++)
 					sockets[sockets_len]=NULL;
 			}
-			if (!sockets[i]) {
+#endif
+#if 0
+			if (!fduserdata_get(sockets_table, )) {
 				sockets[i]=this;
 				sys_sem_signal(socksem);
 				/*
@@ -338,8 +372,7 @@ alloc_socket(struct netconn *newconn,u16_t family)
 				set_lwip_sockmap(fd,i);
 				return fd;
 			}
-		}
-		return -1;
+#endif
 	}
 }
 
@@ -436,11 +469,14 @@ lwip_accept(int s, struct sockaddr *addr, socklen_t *addrlen)
 			|| sock->family == PF_PACKET
 #endif
 	   ) {
+        if (sock) done_with_socket(sock);
 		set_errno(EBADF);
 		return -1;
 	}
 
+	done_with_socket(sock);
 	newconn = netconn_accept(sock->conn);
+	sock = get_socket(s);
 
 	/* get the IP address and port of the remote host */
 	netconn_peer(newconn, &naddr, &port);
@@ -474,11 +510,13 @@ lwip_accept(int s, struct sockaddr *addr, socklen_t *addrlen)
 	}
 
 	/* set by the EVT_ACCEPTPLUS event */
+    // TODO check on this socket
 	newsock = newconn->socket;
 	//printf("ACCEPT return %d was %d %p was %p\n",newsock,s,newconn,sock->conn);
 	if (newsock == -1) {
 		netconn_delete(newconn);
 		sock_set_errno(sock, ENOBUFS);
+        done_with_socket(sock);
 		return -1;
 	}
 
@@ -487,6 +525,7 @@ lwip_accept(int s, struct sockaddr *addr, socklen_t *addrlen)
 	LWIP_DEBUGF(SOCKETS_DEBUG, (" port=%u\n", port));
 
 	sock_set_errno(sock, 0);
+    done_with_socket(sock);
 	return newsock;
 }
 
@@ -504,8 +543,11 @@ lwip_bind(int s, struct sockaddr *name, socklen_t namelen)
 		return -1;
 	}
 #if LWIP_NL
+    // TODO come back to this when integrating libnlq
 	if (sock->family == PF_NETLINK) {
-		return netlink_bind(sock->conn,name,namelen);
+		netlink_bind(sock->conn,name,namelen); // always returns 0
+        done_with_socket(sock);
+        return 0;
 	} 
 	else 
 #endif
@@ -529,6 +571,7 @@ lwip_bind(int s, struct sockaddr *name, socklen_t namelen)
 #if LWIP_CAPABILITIES
 		struct stack *stack=netconn_stack(sock->conn);
 		if (stack->stack_capfun && (stack->stack_capfun()&LWIP_CAP_NET_BIND_SERVICE) == 0) {
+            done_with_socket(sock);
 			set_errno(EPERM);
 			return -1;
 		}
@@ -543,11 +586,13 @@ lwip_bind(int s, struct sockaddr *name, socklen_t namelen)
 		if (err != ERR_OK) {
 			LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_bind(%d) failed, err=%d\n", s, err));
 			sock_set_errno(sock, err_to_errno(err));
+            done_with_socket(sock);
 			return -1;
 		}
 
 		LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_bind(%d) succeeded\n", s));
 		sock_set_errno(sock, 0);
+        done_with_socket(sock);
 		return 0;
 	}
 }
@@ -559,15 +604,17 @@ lwip_close(int s)
 	int err=0;
 
 	LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_close(%d)\n", s));
+#if 0
 	if (!socksem)
 		socksem = sys_sem_new(1);
 
 	/* We cannot allow multiple closes of the same socket. */
 	sys_sem_wait(socksem);
+#endif
 
 	sock = get_socket(s);
 	if (!sock) {
-		sys_sem_signal(socksem);
+		//sys_sem_signal(socksem);
 		set_errno(EBADF);
 		return -1;
 	}
@@ -588,14 +635,17 @@ lwip_close(int s)
 		sock->lastoffset = 0;
 		sock->conn = NULL;
 	}
+#if 0
 	sockets[get_lwip_sockmap(s)]=NULL;
 	if (! _nofdfake)
 		close(sock->fdfake);
 	set_lwip_sockmap(sock->fdfake, -1);
+#endif
 	sock_set_errno(sock, err);
     vpoll_close(sock->efd);
-	mem_free(sock);
-	sys_sem_signal(socksem);
+    fduserdata_del(sock);
+	//mem_free(sock);
+	//sys_sem_signal(socksem);
 	return err;
 }
 
@@ -646,11 +696,13 @@ lwip_connect(int s, struct sockaddr *name, socklen_t namelen)
 	if (err != ERR_OK) {
 		LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_connect(%d) failed, err=%d\n", s, err));
 		sock_set_errno(sock, err_to_errno(err));
+        done_with_socket(sock);
 		return -1;
 	}
 
 	LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_connect(%d) succeeded\n", s));
 	sock_set_errno(sock, 0);
+    done_with_socket(sock);
 	return 0;
 }
 
@@ -679,10 +731,12 @@ lwip_listen(int s, int backlog)
 	if (err != ERR_OK) {
 		LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_listen(%d) failed, err=%d\n", s, err));
 		sock_set_errno(sock, err_to_errno(err));
+        done_with_socket(sock);
 		return -1;
 	}
 
 	sock_set_errno(sock, 0);
+    done_with_socket(sock);
 	return 0;
 }
 
@@ -696,7 +750,7 @@ lwip_recvfrom(int s, void *mem, int len, unsigned int flags,
 	struct ip_addr *addr;
 	u16_t port;
 
-	LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_recvfrom(%d, %p, %d, 0x%x, ..)\n", s, mem, len, flags));
+	LWIP_DEBUGF(SOCKETS_DEBUG, ("[%d:%d] lwip_recvfrom(%d, %p, %d, 0x%x, ..)\n", getpid(), pthread_self(), s, mem, len, flags));
 	sock = get_socket(s);
 	if (!sock) {
 		set_errno(EBADF);
@@ -705,7 +759,10 @@ lwip_recvfrom(int s, void *mem, int len, unsigned int flags,
 
 #if LWIP_NL
 	if (sock->family == PF_NETLINK) {
-		return netlink_recvfrom(sock->conn,mem,len,flags,from,fromlen);
+        // TODO check that the critical section of fduserdata doesn't cause any trouble with this
+		int rv = netlink_recvfrom(sock->conn,mem,len,flags,from,fromlen);
+        done_with_socket(sock);
+        return rv;
 	} else
 #endif
 	{
@@ -719,6 +776,7 @@ lwip_recvfrom(int s, void *mem, int len, unsigned int flags,
 			{
 				LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_recvfrom(%d): returning EWOULDBLOCK\n", s));
 				sock_set_errno(sock, EWOULDBLOCK);
+                done_with_socket(sock);
 				return -1;
 			}
 
@@ -726,7 +784,11 @@ lwip_recvfrom(int s, void *mem, int len, unsigned int flags,
 
 			/* No data was left from the previous operation, so we try to get
 			   some from the network. */
+            // We need to temporarily release the sock object, as the netconn_recv will call
+            // event_callback as a callback and that will call get_socket as well
+            done_with_socket(sock);
 			buf = netconn_recv(sock->conn);
+            sock = get_socket(s);
 
 			if (!buf) {
 				char *p=mem;
@@ -734,6 +796,7 @@ lwip_recvfrom(int s, void *mem, int len, unsigned int flags,
 				LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_recvfrom(%d): buf == NULL!\n", s));
 				*p=0;
 				sock_set_errno(sock, 0);
+                done_with_socket(sock);
 				return 0;
 			}
 		}
@@ -835,6 +898,7 @@ lwip_recvfrom(int s, void *mem, int len, unsigned int flags,
 			netbuf_delete(buf);
 		}
 
+        done_with_socket(sock);
 		sock_set_errno(sock, 0);
 		if (flags & MSG_TRUNC) 
 			return buflen;
@@ -911,7 +975,9 @@ lwip_send(int s, void *data, int size, unsigned int flags)
 
 #if LWIP_NL
 	if (sock->family == PF_NETLINK)  {
-		return netlink_send(sock->conn,data,size,flags);
+		int rv = netlink_send(sock->conn,data,size,flags);
+        done_with_socket(sock);
+        return rv;
 	}
 	else 
 #endif
@@ -932,6 +998,7 @@ lwip_send(int s, void *data, int size, unsigned int flags)
 				if (!buf) {
 					LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_send(%d) ENOBUFS\n", s));
 					sock_set_errno(sock, ENOBUFS);
+                    done_with_socket(sock);
 					return -1;
 				}
 
@@ -955,11 +1022,13 @@ lwip_send(int s, void *data, int size, unsigned int flags)
 		if (err != ERR_OK) {
 			LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_send(%d) err=%d\n", s, err));
 			sock_set_errno(sock, err_to_errno(err));
+            done_with_socket(sock);
 			return -1;
 		}
 
 		LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_send(%d) ok size=%d\n", s, size));
 		sock_set_errno(sock, 0);
+        done_with_socket(sock);
 		return size;
 	}
 }
@@ -981,7 +1050,9 @@ lwip_sendto(int s, void *data, int size, unsigned int flags,
 
 #if LWIP_NL
 	if (sock->family == PF_NETLINK)  {
-		return netlink_sendto(sock->conn,data,size,flags,to,tolen);
+		int rv = netlink_sendto(sock->conn,data,size,flags,to,tolen);
+        done_with_socket(sock);
+        return rv;
 	}
 	else 
 #endif
@@ -1019,6 +1090,7 @@ lwip_sendto(int s, void *data, int size, unsigned int flags,
 			if (tolen>0) netconn_connect(sock->conn, &addr, port);
 		} else
 			netconn_disconnect(sock->conn);
+        done_with_socket(sock);
 		return ret;
 	}
 }
@@ -1275,6 +1347,7 @@ static void um_sel_signal(int fd, int events)
 	um_sel_head=um_sel_rec_signal(um_sel_head,fd,events);
 }
 
+#if 0
 int lwip_event_subscribe(void (* cb)(), void *arg, int fd, int events)
 {
 	struct lwip_socket *psock=get_socket(fd);
@@ -1301,6 +1374,7 @@ int lwip_event_subscribe(void (* cb)(), void *arg, int fd, int events)
 	sys_sem_signal(selectsem);
 	return rv;
 }
+#endif
 
 	static void
 event_callback(struct netconn *conn, enum netconn_evt evt, u16_t len)
@@ -1327,17 +1401,20 @@ event_callback(struct netconn *conn, enum netconn_evt evt, u16_t len)
 			int newsock;
 			newsock = alloc_socket(conn,sock->family);
 			if (newsock >= 0) {
+                done_with_socket(sock);
 				sock = get_socket(newsock);
 				sock->rcvevent =0;
 			}
 			conn->socket = newsock;
 			//printf("NETCONN_EVT_ACCEPTPLUS %p %d \n",conn,newsock);
+            done_with_socket(sock);
 			return;
 		}
 	}
 	else
 		return;
 
+    // TODO indagate this selectsem
 	if (!selectsem)
 		selectsem = sys_sem_new(1);
 
@@ -1362,9 +1439,10 @@ event_callback(struct netconn *conn, enum netconn_evt evt, u16_t len)
 
     int events = EPOLLIN * (sock->rcvevent || sock->lastdata || sock->conn->recv_avail) + EPOLLOUT *
         sock->sendevent;
-    vpoll_ctl(sock->efd,VPOLL_CTL_SETEVENTS,events);
-    
+    int efd = sock->efd;
 	//printf("EVENT fd %d(%d) R%d S%d\n",s,evt,sock->rcvevent,sock->sendevent);
+    done_with_socket(sock);
+    vpoll_ctl(efd,VPOLL_CTL_SETEVENTS,events);
 	sys_sem_signal(selectsem);
 }
 
@@ -1376,14 +1454,16 @@ lwip_shutdown(int s, int how)
 	u16_t perm;
 
 	LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_shutdown(%d, how=%d)\n", s, how));
+#if 0
 	if (!socksem)
 		socksem = sys_sem_new(1);
 
 	sys_sem_wait(socksem);
+#endif
 
 	sock = get_socket(s);
 	if (!sock) {
-		sys_sem_signal(socksem);
+		//sys_sem_signal(socksem);
 		set_errno(EBADF);
 		return -1;
 	}
@@ -1392,7 +1472,8 @@ lwip_shutdown(int s, int how)
 	perm &= ~((how & O_ACCMODE)+1);
 	sock->flags = (sock->flags & ~O_ACCMODE) | ((perm - 1) & O_ACCMODE);
 
-	sys_sem_signal(socksem);
+    done_with_socket(sock);
+	//sys_sem_signal(socksem);
 	return 0;
 }
 
@@ -1451,6 +1532,8 @@ lwip_getpeername (int s, struct sockaddr *name, socklen_t *namelen)
 
 	sock_set_errno(sock, 0);
 
+    done_with_socket(sock);
+
 	return 0;
 }
 
@@ -1469,7 +1552,9 @@ lwip_getsockname (int s, struct sockaddr *name, socklen_t *namelen)
 
 #if LWIP_NL
 	if (sock->family == PF_NETLINK) {
-		return netlink_getsockname (sock->conn,name,namelen);
+		int rv = netlink_getsockname (sock->conn,name,namelen);
+        done_with_socket(sock);
+        return rv;
 	}
 	else 
 #endif
@@ -1479,6 +1564,7 @@ lwip_getsockname (int s, struct sockaddr *name, socklen_t *namelen)
 		err = netconn_addr(sock->conn, &naddr, &port);
 		if (err != ERR_OK) {
 			set_errno(EINVAL);
+            done_with_socket(sock);
 			return -1;
 		}
 
@@ -1514,6 +1600,7 @@ lwip_getsockname (int s, struct sockaddr *name, socklen_t *namelen)
 		}
 
 		sock_set_errno(sock, 0);
+        done_with_socket(sock);
 		return 0;
 	}
 }
@@ -1531,12 +1618,14 @@ lwip_getsockopt (int s, int level, int optname, void *optval, socklen_t *optlen)
 
 	if( NULL == optval || NULL == optlen ) {
 		sock_set_errno( sock, EFAULT );
+        done_with_socket(sock);
 		return -1;
 	}
 
 #if LWIP_NL
 	if(sock->family == PF_NETLINK) {
 		int err=netlink_getsockopt(sock->conn, level, optname, optval, optlen); 
+        done_with_socket(sock);
 		if (err != 0) {
 			sock_set_errno(sock, err);
 			return -1;
@@ -1610,7 +1699,11 @@ lwip_getsockopt (int s, int level, int optname, void *optval, socklen_t *optlen)
 			}
 
 			/* If this is no TCP socket, ignore any options. */
-			if ( sock->conn->type != NETCONN_TCP ) return 0;
+			if ( sock->conn->type != NETCONN_TCP ) 
+            {
+                done_with_socket(sock);
+                return 0;
+            }
 
 			switch( optname ) {
 				case TCP_NODELAY:
@@ -1632,6 +1725,7 @@ lwip_getsockopt (int s, int level, int optname, void *optval, socklen_t *optlen)
 
 	if( 0 != err ) {
 		sock_set_errno(sock, err);
+        done_with_socket(sock);
 		return -1;
 	}
 
@@ -1735,6 +1829,7 @@ lwip_getsockopt (int s, int level, int optname, void *optval, socklen_t *optlen)
 	}
 
 	sock_set_errno(sock, err);
+    done_with_socket(sock);
 	return err ? -1 : 0;
 }
 
@@ -1750,6 +1845,7 @@ lwip_setsockopt (int s, int level, int optname, const void *optval, socklen_t op
 		return -1;
 	}
 	if( NULL == optval ) {
+        done_with_socket(sock);
 		sock_set_errno( sock, EFAULT );
 		/*printf("fault\n");*/
 		return -1;
@@ -1758,6 +1854,7 @@ lwip_setsockopt (int s, int level, int optname, const void *optval, socklen_t op
 #if LWIP_NL
 	if(sock->family == PF_NETLINK) {
 		int err=netlink_setsockopt(sock->conn, level, optname, optval, optlen);
+        done_with_socket(sock);
 		if (err != 0) {
 			sock_set_errno(sock, err);
 			return -1;
@@ -1835,7 +1932,11 @@ lwip_setsockopt (int s, int level, int optname, const void *optval, socklen_t op
 			}
 
 			/* If this is not a TCP socket, ignore any options. */
-			if ( sock->conn->type != NETCONN_TCP ) return 0;
+			if ( sock->conn->type != NETCONN_TCP ) 
+            {
+                done_with_socket(sock);
+                return 0;
+            }
 
 			switch( optname ) {
 				case TCP_NODELAY:
@@ -1924,6 +2025,7 @@ lwip_setsockopt (int s, int level, int optname, const void *optval, socklen_t op
 
 	if( 0 != err ) {
 		sock_set_errno(sock, err);
+        done_with_socket(sock);
 		return -1;
 	}
 
@@ -2047,6 +2149,7 @@ lwip_setsockopt (int s, int level, int optname, const void *optval, socklen_t op
 	}  /* switch */
 
 	sock_set_errno(sock, err);
+    done_with_socket(sock);
 	return err ? -1 : 0;
 }
 
@@ -2075,6 +2178,7 @@ int lwip_ioctl(int s, unsigned long cmd, void *argp)
 		case FIONREAD:
 			if (!argp) {
 				sock_set_errno(sock, EINVAL);
+                done_with_socket(sock);
 				return -1;
 			}
 
@@ -2082,6 +2186,7 @@ int lwip_ioctl(int s, unsigned long cmd, void *argp)
 
 			LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_ioctl(%d, FIONREAD, %p) = %lu\n", s, argp, *((u32_t*)argp)));
 			sock_set_errno(sock, 0);
+            done_with_socket(sock);
 			return 0;
 
 		case FIONBIO:
@@ -2091,11 +2196,13 @@ int lwip_ioctl(int s, unsigned long cmd, void *argp)
 				sock->flags &= ~O_NONBLOCK;
 			LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_ioctl(%d, FIONBIO, %d)\n", s, !!(sock->flags & O_NONBLOCK)));
 			sock_set_errno(sock, 0);
+            done_with_socket(sock);
 			return 0;
 
 		case SIOCGIFTXQLEN: /* XXX hack */
 			if (!argp) {
 				sock_set_errno(sock, EINVAL);
+                done_with_socket(sock);
 				return -1;
 			}
 
@@ -2103,6 +2210,7 @@ int lwip_ioctl(int s, unsigned long cmd, void *argp)
 
 			LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_ioctl(%d, SIOCGIFTXQLEN, %p) = %u\n", s, argp, *((u16_t*)argp)));
 			sock_set_errno(sock, 0);
+            done_with_socket(sock);
 			return 0;
 
 		case SIOCGSTAMP:
@@ -2112,6 +2220,7 @@ int lwip_ioctl(int s, unsigned long cmd, void *argp)
 				gettimeofday(&tv,&tz);
 				memcpy(argp,&tv,sizeof(struct timeval));  
 			}
+            done_with_socket(sock);
 			return 0;
 		default:
 			stack=netconn_stack(sock->conn);
@@ -2130,6 +2239,7 @@ int lwip_ioctl(int s, unsigned long cmd, void *argp)
 						);
 				sock_set_errno(sock, err);
 				LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_ioctl(%d, SIO TO NETIF) ret=%d\n",s,err));
+                done_with_socket(sock);
 				if (err)
 					return -1;
 				else
@@ -2144,6 +2254,7 @@ int lwip_ioctl(int s, unsigned long cmd, void *argp)
 						);
 				sock_set_errno(sock, err);
 				LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_ioctl(%d, SIO TO NETIF) ret=%d\n",s,err));
+                done_with_socket(sock);
 				if (err)
 					return -1;
 				else
@@ -2154,6 +2265,7 @@ int lwip_ioctl(int s, unsigned long cmd, void *argp)
 
 				sock_set_errno(sock, ENOSYS); /* not yet implemented */
 
+                done_with_socket(sock);
 				return -1;
 			}
 	}
@@ -2183,8 +2295,10 @@ int lwip_fcntl64(int s, int cmd, long arg)
 
 	switch (cmd) {
 		case F_GETFL:
+            done_with_socket(sock);
 			return sock->flags;
 		case F_SETFL:
+            done_with_socket(sock);
 			sock->flags = (sock->flags & ~FCNTL_SETFL_MASK) | (arg & FCNTL_SETFL_MASK);
 			return 0;
 		default:
@@ -2305,8 +2419,8 @@ int lwip_pselect(int maxfdp1, fd_set *readset, fd_set *writeset, fd_set *excepts
         {
             int fd = i;
             ev.data.fd = fd;
-            if ((p_sock=get_socket(i))!=NULL) 
-                fd = p_sock->efd;
+            // if ((p_sock=get_socket(i))!=NULL) 
+            //     fd = p_sock->efd;
             if ((epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev)) == -1)
                 return -1;
         }
@@ -2330,45 +2444,25 @@ int lwip_pselect(int maxfdp1, fd_set *readset, fd_set *writeset, fd_set *excepts
             LWIP_DEBUGF(SOCKETS_DEBUG, ("EPOLLIN = %d\n",revents[i].events & EPOLLIN));
             LWIP_DEBUGF(SOCKETS_DEBUG, ("EPOLLOUT = %d\n",revents[i].events & EPOLLOUT));
             LWIP_DEBUGF(SOCKETS_DEBUG, ("EPOLLPRI = %d\n",revents[i].events & EPOLLPRI));
-            if ((p_sock = get_socket(fd)) != NULL)
+            if (readset) 
             {
-                LWIP_DEBUGF(SOCKETS_DEBUG, ("It's a lwip_socket\n"));
-                if (readset) 
-                {
-                    if (FD_ISSET(fd,readset) && !(revents[i].events & EPOLLIN))
-                        FD_CLR(fd,readset);
-                }
-                if (writeset) 
-                {
-                    if (FD_ISSET(fd,writeset) && !(revents[i].events & EPOLLOUT))
-                        FD_CLR(fd,writeset);
-                }
-                if (exceptset) 
-                {
-                    if (FD_ISSET(fd,exceptset) && !(revents[i].events & EPOLLPRI))
-                        FD_CLR(fd,exceptset);
-                }
+                if (FD_ISSET(fd,readset) && !(revents[i].events & EPOLLIN))
+                    FD_CLR(fd,readset);
             }
-            else
+            if (writeset) 
             {
-                LWIP_DEBUGF(SOCKETS_DEBUG, ("It's not a lwip_socket\n"));
-                if (readset)
-                {
-                    if (FD_ISSET(fd,readset) && !(revents[i].events & EPOLLIN))
-                        FD_CLR(fd,readset);
-                }
-                if (writeset)
-                {
-                    if (FD_ISSET(fd,writeset) && !(revents[i].events & EPOLLOUT))
-                        FD_CLR(fd,writeset);
-                }
-                if (exceptset)
-                {
-                    if (FD_ISSET(fd,exceptset) && !(revents[i].events & EPOLLPRI))
-                        FD_CLR(fd,exceptset);
-                }
+                if (FD_ISSET(fd,writeset) && !(revents[i].events & EPOLLOUT))
+                    FD_CLR(fd,writeset);
+            }
+            if (exceptset) 
+            {
+                if (FD_ISSET(fd,exceptset) && !(revents[i].events & EPOLLPRI))
+                    FD_CLR(fd,exceptset);
             }
         }
+	}
+
+	for (i=0;i<maxfdp1;i++) {
         if (interesting_fd(i,readset,writeset,exceptset) && !handled[i])
         {
             LWIP_DEBUGF(SOCKETS_DEBUG, ("Registered fd with no events\n"));
@@ -2383,7 +2477,7 @@ int lwip_pselect(int maxfdp1, fd_set *readset, fd_set *writeset, fd_set *excepts
             if (exceptset && FD_ISSET(i,exceptset))
                 FD_CLR(i,exceptset);
         }
-	}
+    }
 
     close(epfd);
 
@@ -2489,11 +2583,10 @@ int lwip_ppoll(struct pollfd *fds, nfds_t nfds,
 		const struct timespec *timeout, const sigset_t *sigmask) {
 	int i,j;
 	int rv;
-	struct epoll_event *revents = alloca(nfds*sizeof(struct epoll_event));
+	struct epoll_event revents[nfds];
     memset(revents,-1,nfds*sizeof(struct epoll_event));
     LWIP_DEBUGF(SOCKETS_DEBUG, ("revents[%d] = {fd: %d, events: %x}\n",0,revents[0].data.fd,revents[0].events));
     LWIP_DEBUGF(SOCKETS_DEBUG, ("revents[%d] = {fd: %d, events: %x}\n",1,revents[1].data.fd,revents[1].events));
-    struct lwip_socket *p_sock;
     int epfd;
     epfd = epoll_create1(EPOLL_CLOEXEC);
     // Errors from epoll are not "translated" into errors for ppoll. Should probably fix this
@@ -2502,10 +2595,10 @@ int lwip_ppoll(struct pollfd *fds, nfds_t nfds,
 	for (i=0;i<nfds;i++) {
 		if (fds[i].fd > -1 && fds[i].events) {
             struct epoll_event ev = {0};
-            int fd = fds[i].fd;
-            if ((p_sock=get_socket(fds[i].fd))!=NULL)
-                fd = p_sock->efd;
-			ev.data.fd = fd;
+            // int fd = fds[i].fd;
+            // if ((p_sock=get_socket(fds[i].fd))!=NULL)
+            //     fd = p_sock->efd;
+			ev.data.fd = fds[i].fd;
             ev.events = 0;
             if (fds[i].events & POLLIN)
                 ev.events |= EPOLLIN;
@@ -2513,7 +2606,7 @@ int lwip_ppoll(struct pollfd *fds, nfds_t nfds,
                 ev.events |= EPOLLOUT;
             if (fds[i].events & POLLPRI)
                 ev.events |= EPOLLPRI;
-            if ((epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev)) == -1)
+            if ((epoll_ctl(epfd, EPOLL_CTL_ADD, fds[i].fd, &ev)) == -1)
                 return -1;
 		}
 	}
@@ -2524,12 +2617,10 @@ int lwip_ppoll(struct pollfd *fds, nfds_t nfds,
         return -1;
 	for (i=0;i<nfds;i++) {
         LWIP_DEBUGF(SOCKETS_DEBUG, ("revents[%d] = {fd: %d, events: %x}\n",i,revents[i].data.fd,revents[i].events));
-        int fd = fds[i].fd;
-        if ((p_sock = get_socket(fds[i].fd)) != NULL)
-            fd = p_sock->efd;
-		if (fd > -1) {
+        //int fd = fds[i].fd;
+		if (fds[i].fd > -1) {
             for (j=0;j<nfds;j++) {
-                if (revents[j].data.fd == fd)
+                if (revents[j].data.fd == fds[i].fd)
                 {
                     if (revents[j].events & EPOLLIN)
                         fds[i].revents |= POLLIN;
@@ -2547,23 +2638,23 @@ int lwip_ppoll(struct pollfd *fds, nfds_t nfds,
 	return rv;
 }
 
-int lwip_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
-{
-    // Mon 10 Jun 2019 03:03:02 PM CEST
-    // No check is made on whether event != NULL. Should probably change that
-    if (epfd > -1 && fd > -1)
-    {
-        struct lwip_socket *p_sock = get_socket(fd);
-        if (p_sock != NULL)
-            fd = p_sock->efd;
-        return epoll_ctl(epfd,op,fd,event);
-    }
-    else
-    {
-        set_errno(EBADF);
-        return -1;
-    }
-}
+//int lwip_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
+//{
+//    // Mon 10 Jun 2019 03:03:02 PM CEST
+//    // No check is made on whether event != NULL. Should probably change that
+//    if (epfd > -1 && fd > -1)
+//    {
+//        // struct lwip_socket *p_sock = get_socket(fd);
+//        // if (p_sock != NULL)
+//        //     fd = p_sock->efd;
+//        return epoll_ctl(epfd,op,fd,event);
+//    }
+//    else
+//    {
+//        set_errno(EBADF);
+//        return -1;
+//    }
+//}
 
 int lwip_poll(struct pollfd *fds, nfds_t nfds, int timeout) {
 	int rv;
@@ -2668,6 +2759,18 @@ ssize_t lwip_readv(int s, struct iovec *vector, int count)
 	mem_free(temp_buf);
 
 	return ret;
+}
+
+int fstat(int fd, struct stat *buf){
+    if (buf)
+    {
+        int rv = fstat(fd,buf);
+        if (rv > -1)
+            buf->st_mode = (buf->st_mode & ~S_IFMT) | S_IFSOCK;
+        return rv;
+    }
+    else
+        return -1;
 }
 
 /*
