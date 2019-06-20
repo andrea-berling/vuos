@@ -25,9 +25,6 @@
 #include <fduserdata.h>
 
 #define EFD_VPOLL (1 << 1)
-#define EFD_VPOLL_ADDEVENTS (1UL << 32)
-#define EFD_VPOLL_DELEVENTS (2UL << 32)
-#define EFD_VPOLL_MODEVENTS (3UL << 32)
 
 static FDUSERDATA *fdtable;
 
@@ -121,8 +118,7 @@ static int vpollemu_close(int fd) {
 		return -1;
 	close(data->fd);
 	close(fd);
-	fduserdata_put(data);
-	fduserdata_del(fdtable, fd);
+	fduserdata_del(data);
 	return 0;
 }
 

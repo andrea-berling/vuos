@@ -722,7 +722,7 @@ a lot of data that needs to be copied, this should be set high. */
 #endif
 
 #ifndef TCPIP_DEBUG
-#define TCPIP_DEBUG                     DBG_ON
+#define TCPIP_DEBUG                     DBG_OFF
 #endif
 
 #ifndef LWSLIRP_DEBUG

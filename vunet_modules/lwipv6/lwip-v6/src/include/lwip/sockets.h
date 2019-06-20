@@ -439,6 +439,8 @@ struct linger {
 #define ICMPV6_FILTER                       1
 #endif
 
+#define SOCK_TABLE_SIZE 64
+
 int lwip_accept(int s, struct sockaddr *addr, socklen_t *addrlen);
 int lwip_bind(int s, struct sockaddr *name, socklen_t namelen);
 int lwip_shutdown(int s, int how);

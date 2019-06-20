@@ -83,10 +83,10 @@ int main(int argc,char *argv[])
     }
     ev.data.fd = STDIN_FILENO;
     ev.events = EPOLLIN;
-    lwip_epoll_ctl(epfd,EPOLL_CTL_ADD,STDIN_FILENO,&ev);
+    epoll_ctl(epfd,EPOLL_CTL_ADD,STDIN_FILENO,&ev);
     ev.data.fd = fd;
     ev.events = EPOLLIN;
-    lwip_epoll_ctl(epfd,EPOLL_CTL_ADD,fd,&ev);
+    epoll_ctl(epfd,EPOLL_CTL_ADD,fd,&ev);
     /* wait for input both from stdin and from the socket */
     printf("Ready\n");
     epoll_wait(epfd,revents,2,-1);

@@ -1,7 +1,7 @@
 /*
  *   Associate user defined data to file descriptors. (thread-safe).
  *
- *   Copyright (C) 2018  Renzo Davoli <renzo@cs.unibo.it> VirtualSquare team.
+ *   Copyright (C) 2019  Renzo Davoli <renzo@cs.unibo.it> VirtualSquare team.
  *
  *   This library is free software; you can redistribute it and/or modify it
  *   under the terms of the GNU Lesser General Public License as published by
@@ -23,26 +23,24 @@
 #define DEFAULT_MASK 0x3f // 63
 
 #ifndef container_of
-#define container_of(ptr, type, member) ({ \
-    const typeof( ((type *)0)->member ) *__mptr = (ptr); \
-    (type *)( (char *)__mptr - offsetof(type,member) );})
+#define container_of(ptr, type, member) \
+	((type *)((char *)(ptr) -  offsetof(type,member)))
 #endif
 
 struct fduserdata_table;
 typedef struct fduserdata_table FDUSERDATA;
 
-struct fduserdata {
-	struct fduserdata *next;
+struct fduserdata_item {
+	struct fduserdata_item *next;
+	struct fduserdata_table *fdtable;
 	int fd;
-	_Atomic int count;
-	pthread_mutex_t mutex;
 	char data[];
 };
 
 struct fduserdata_table {
 	int mask;
 	pthread_mutex_t mutex;
-	struct fduserdata *table[];
+	struct fduserdata_item *table[];
 };
 
 static int size2mask(int x) {
@@ -59,16 +57,12 @@ static int size2mask(int x) {
 
 FDUSERDATA *fduserdata_create(int size) {
 	int mask = size2mask(size);
-	struct fduserdata_table *table = calloc(1, sizeof(struct fduserdata_table) + (mask + 1) * sizeof(struct fduserdata *));
-	if (table != NULL)
+	struct fduserdata_table *table = calloc(1, sizeof(struct fduserdata_table) + (mask + 1) * sizeof(struct fduserdata_item *));
+	if (table != NULL) {
 		table->mask = mask;
-	pthread_mutex_init(&table->mutex, NULL);
+		pthread_mutex_init(&table->mutex, NULL);
+	}
 	return table;
-}
-
-void fduserdata_release(struct fduserdata *fdud) {
-	pthread_mutex_destroy(&fdud->mutex);
-	free(fdud);
 }
 
 void fduserdata_destroy(FDUSERDATA *fdtable) {
@@ -76,11 +70,11 @@ void fduserdata_destroy(FDUSERDATA *fdtable) {
 		int i;
 		pthread_mutex_lock(&fdtable->mutex);
 		for (i = 0; i < (fdtable->mask + 1) ; i++) {
-			struct fduserdata *fdud = fdtable->table[i];
+			struct fduserdata_item *fdud = fdtable->table[i];
 			while (fdud != NULL) {
-				struct fduserdata *this = fdud;
+				struct fduserdata_item *this = fdud;
 				fdud = this->next;
-				fduserdata_release(this);
+				free(fdud);
 			}
 		}
 		pthread_mutex_unlock(&fdtable->mutex);
@@ -89,21 +83,18 @@ void fduserdata_destroy(FDUSERDATA *fdtable) {
 	}
 }
 
-void *fduserdata_set(FDUSERDATA *fdtable, int fd, size_t count) {
+void *__fduserdata_new(FDUSERDATA *fdtable, int fd, size_t count) {
 	if (fdtable != NULL) {
-		struct fduserdata *fdud = malloc(sizeof(struct fduserdata) + count);
+		struct fduserdata_item *fdud = malloc(sizeof(struct fduserdata_item) + count);
 		int index;
 		if (fdud == NULL)
 			return errno = ENOMEM, NULL;
 		pthread_mutex_lock(&fdtable->mutex);
 		index = fd & fdtable->mask;
 		fdud->fd = fd;
-		fdud->count = 2;
+		fdud->fdtable = fdtable;
 		fdud->next = fdtable->table[index];
 		fdtable->table[index] = fdud;
-		pthread_mutex_init(&fdud->mutex, NULL);
-		pthread_mutex_unlock(&fdtable->mutex);
-		pthread_mutex_lock(&fdud->mutex);
 		return fdud->data;
 	} else
 		return errno = EINVAL, NULL;
@@ -113,67 +104,66 @@ void *fduserdata_get(FDUSERDATA *fdtable, int fd) {
 	if (fdtable != NULL) {
 		pthread_mutex_lock(&fdtable->mutex);
 		int index = fd & fdtable->mask;
-		struct fduserdata *fdud;
+		struct fduserdata_item *fdud;
 		for (fdud = fdtable->table[index]; fdud != NULL && fdud->fd != fd; fdud = fdud->next)
 			;
-		if (fdud != NULL)
-			fdud->count++;
-		pthread_mutex_unlock(&fdtable->mutex);
-		if (fdud != NULL) {
-			pthread_mutex_lock(&fdud->mutex);
-			return fdud->data;
-		} else
+		if (fdud == NULL) {
+			pthread_mutex_unlock(&fdtable->mutex);
 			return errno = EBADF, NULL;
+		} else
+			return fdud->data;
 	} else
 		return errno = EINVAL, NULL;
 }
 
-void fduserdata_put(void *data) {
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wpedantic"
-	struct fduserdata *fdud = container_of(data, struct fduserdata, data);
-#pragma GCC diagnostic pop
-	int count = --fdud->count;
-	pthread_mutex_unlock(&fdud->mutex);
-	if (count == 0)
-		fduserdata_release(fdud);
+
+static inline __attribute__((always_inline)) struct fduserdata_item *data2item(void *data) {
+	return container_of(data, struct fduserdata_item, data);
 }
 
-int fduserdata_del(FDUSERDATA *fdtable, int fd) {
-	if (fdtable != NULL) {
-		pthread_mutex_lock(&fdtable->mutex);
+void fduserdata_put(void *data) {
+	if (data != NULL) {
+		struct fduserdata_item *fdud = data2item(data);
+		pthread_mutex_unlock(&fdud->fdtable->mutex);
+	}
+}
+
+
+int fduserdata_del(void *data) {
+	if (data == NULL)
+		return errno = EINVAL, -1;
+	else {
+		struct fduserdata_item *fdud = data2item(data);
+		FDUSERDATA *fdtable = fdud->fdtable;
+		int fd = fdud->fd;
 		int index = fd & fdtable->mask;
-		int count;
-		struct fduserdata **fdud;
-		for (fdud = &(fdtable->table[index]); *fdud != NULL && (*fdud)->fd != fd; fdud = &((*fdud)->next))
+		struct fduserdata_item **sfdud;
+		for (sfdud = &(fdtable->table[index]); *sfdud != NULL && (*sfdud) != fdud; sfdud = &((*sfdud)->next))
 			;
-		if (*fdud != NULL) {
-			struct fduserdata *this = *fdud;
-			count = --this->count;
-			*fdud = this->next;
+		if (*sfdud != NULL) {
+			*sfdud = fdud->next;
+			free(fdud);
 			pthread_mutex_unlock(&fdtable->mutex);
-			if (count == 0)
-				fduserdata_release(this);
 			return 0;
 		} else {
 			pthread_mutex_unlock(&fdtable->mutex);
 			return errno = EBADF, -1;
-		}
-	} else
-		return errno = EINVAL, -1;
+		} 
+	}
 }
 
 #if 0
 int main(int argc, char *argv[]) {
 	FDUSERDATA *fdtable = fduserdata_create(0);
+	printf("XXX %d\n", sizeof(struct fduserdata_item));
 	int *data;
-	data = fduserdata_set(fdtable, 1, sizeof(* data));
+	data = __fduserdata_new(fdtable, 1, sizeof(* data));
 	if (data) *data = 1;
 	if (data) fduserdata_put(data);
-	data = fduserdata_set(fdtable, 2, sizeof(* data));
+	data = __fduserdata_new(fdtable, 2, sizeof(* data));
 	if (data) if (data) *data = 2;
 	fduserdata_put(data);
-	data = fduserdata_set(fdtable, 65, sizeof(* data));
+	data = __fduserdata_new(fdtable, 65, sizeof(* data));
 	if (data) if (data) *data = 65;
 	fduserdata_put(data);
 	data = fduserdata_get(fdtable, 1);
@@ -185,15 +175,18 @@ int main(int argc, char *argv[]) {
 	data = fduserdata_get(fdtable, 65);
 	if (data) printf("%d\n",*data);
 	if (data) fduserdata_put(data);
-	fduserdata_del(fdtable, 2);
-	fduserdata_del(fdtable, 3);
+	data = fduserdata_get(fdtable, 2);
+	if (data) fduserdata_del(data);
+	data = fduserdata_get(fdtable, 3);
+	if (data) fduserdata_del(data);
 	data = fduserdata_get(fdtable, 2);
 	if (data) printf("%d\n",*data); else printf("NULL\n");
 	if (data) fduserdata_put(data);
 	data = fduserdata_get(fdtable, 1);
 	if (data) printf("%d\n",*data); else printf("NULL\n");
 	if (data) fduserdata_put(data);
-	fduserdata_del(fdtable, 1);
+	data = fduserdata_get(fdtable, 1);
+	if (data) fduserdata_del(data);
 	data = fduserdata_get(fdtable, 1);
 	if (data) printf("%d\n",*data); else printf("NULL\n");
 	if (data) fduserdata_put(data);

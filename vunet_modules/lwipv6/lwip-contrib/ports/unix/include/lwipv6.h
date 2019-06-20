@@ -28,6 +28,7 @@
 #include <stdint.h>   /* uint32_t */ 
 #include <errno.h>
 #include <sys/poll.h>
+#include <sys/stat.h>
 #include <sys/epoll.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -185,6 +186,7 @@ ssize_t lwip_recvmsg(int fd, struct msghdr *msg, int flags);
 ssize_t lwip_sendmsg(int fd, const struct msghdr *msg, int flags); 
 
 int lwip_msocket(struct stack *stack, int domain, int type, int protocol);
+int lwip_fstat(int fd, struct stat *buf);
 int lwip_socket(int domain, int type, int protocol);
 ssize_t lwip_write(int s, void *dataptr, int size);
 int lwip_select(int maxfdp1, fd_set *readset, fd_set *writeset, fd_set *exceptset,
@@ -194,7 +196,7 @@ int lwip_pselect(int maxfdp1, fd_set *readset, fd_set *writeset, fd_set *excepts
 int lwip_poll(struct pollfd *fds, nfds_t nfds, int timeout);
 int lwip_ppoll(struct pollfd *fds, nfds_t nfds,
 		const struct timespec *timeout, const sigset_t *sigmask);
-int lwip_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event);
+//int lwip_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event);
 
 int lwip_ioctl(int s, long cmd, void *argp);
 int lwip_fcntl64(int s, int cmd, long arg);
@@ -278,11 +280,12 @@ lwiplongfun lwip_add_addr,
 			lwip_socket,
 			lwip_select,
 			lwip_pselect,
-			lwip_epoll_ctl,
+			//lwip_epoll_ctl,
 			lwip_poll,
 			lwip_ppoll,
 			lwip_ioctl,
 			lwip_msocket,
+            lwip_fstat,
 			lwip_event_subscribe;
 
 lwipssizetfun lwip_recv,
@@ -338,13 +341,14 @@ static inline void *loadlwipv6dl()
 		{"lwip_write", &lwip_write},
 		{"lwip_select", &lwip_select},
 		{"lwip_pselect", &lwip_pselect},
-		{"lwip_epoll_ctl", &lwip_epoll_ctl},
+		//{"lwip_epoll_ctl", &lwip_epoll_ctl},
 		{"lwip_poll", &lwip_poll},
 		{"lwip_ppoll", &lwip_ppoll},
 		{"lwip_ioctl", &lwip_ioctl},
 		{"lwip_readv", &lwip_readv},
 		{"lwip_writev", &lwip_writev},
 		{"lwip_msocket", &lwip_msocket},
+		{"lwip_fstat", &lwip_fstat},
 		{"lwip_add_vdeif", (lwiplongfun *)(&lwip_add_vdeif)},
 		{"lwip_add_tapif", (lwiplongfun *)(&lwip_add_tapif)},
 		{"lwip_add_tunif", (lwiplongfun *)(&lwip_add_tunif)}, 

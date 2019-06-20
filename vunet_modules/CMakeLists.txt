@@ -15,4 +15,4 @@ endforeach(VUNET_MOD)
 
 target_link_libraries(vunetvdestack vdeplug)
 add_subdirectory(lwipv6)
-target_link_libraries(vunetlwipv6 lwipv6 vpoll)
+target_link_libraries(vunetlwipv6 lwipv6 vpoll fduserdata)

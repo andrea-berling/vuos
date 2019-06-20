@@ -1,7 +1,7 @@
 /*
  *   Associate user defined data to file descriptors. (thread-safe).
  *
- *   Copyright (C) 2018  Renzo Davoli <renzo@cs.unibo.it> VirtualSquare team.
+ *   Copyright (C) 2019  Renzo Davoli <renzo@cs.unibo.it> VirtualSquare team.
  *
  *   This library is free software; you can redistribute it and/or modify it
  *   under the terms of the GNU Lesser General Public License as published by
@@ -26,10 +26,14 @@
  *      fduserdata_put(data);
  *
  *      // search for data 
+ *      // there is mutual exclusion between new/put, get/put (or new/del, get/del)
+ *      // so do not insert time consuming or blocking ops.
  *      struct mydata *fddata = fduserdata_get(table, fd);
  *      if (fddata) {
  *                     //... read/update user defined data (data->fields)
  *                     fduserdata_put(data);
+ *                     // use fduserdata_del instead of fduserdata_put to
+ *                     // delete the element
  *      }
  *
  *      // at the end... when table is no longer required
@@ -46,13 +50,13 @@ typedef struct fduserdata_table FDUSERDATA;
 FDUSERDATA *fduserdata_create(int size);
 void fduserdata_destroy(FDUSERDATA *fdtable);
 
-#define fduserdata_new(fdtable, fd, type) ((type *)(fduserdata_set((fdtable),(fd),sizeof(type))))
-void *fduserdata_set(FDUSERDATA *fdtable, int fd, size_t count);
+#define fduserdata_new(fdtable, fd, type) ((type *)(__fduserdata_new((fdtable),(fd),sizeof(type))))
+void *__fduserdata_new(FDUSERDATA *fdtable, int fd, size_t count);
 
 void *fduserdata_get(FDUSERDATA *fdtable, int fd); 
 
 void fduserdata_put(void *data);
 
-int fduserdata_del(FDUSERDATA *fdtable, int fd);
+int fduserdata_del(void *data);
 
 #endif
