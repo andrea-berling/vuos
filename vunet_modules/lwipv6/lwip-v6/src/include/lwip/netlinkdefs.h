@@ -1,3 +1,4 @@
+#if 0
 #ifndef _NETLINKDEFS_H
 #define _NETLINKDEFS_H
 
@@ -736,3 +737,10 @@ enum
 #endif
 /* End of information exported to user level */
 #endif
+#endif
+#define IFA_F_SECONDARY		0x01
+#define IFA_F_TEMPORARY		IFA_F_SECONDARY
+
+#define IFA_F_DEPRECATED	0x20
+#define IFA_F_TENTATIVE		0x40
+#define IFA_F_PERMANENT		0x80

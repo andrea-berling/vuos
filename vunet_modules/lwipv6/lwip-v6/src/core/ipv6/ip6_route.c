@@ -301,6 +301,250 @@ static int isdefault (struct ip_addr *addr)
 		|| (ip_addr_is_v4comp(addr) && addr->addr[3] ==0);
 }
 
+void *ip_route_netlink_searchroute(struct nlmsghdr *msg, struct nlattr **attr, void *stackinfo){
+    struct rtmsg *rtm=(struct rtmsg *)(msg+1);
+    char family=0;
+    struct stack *stack = stackinfo;
+    /*printf("ip_route_netlink_getrotue %x\n",flag);*/
+    family=rtm->rtm_family;
+    struct ip_addr ipaddr,netmask;
+    struct ip_route_list *dp = stack->ip_route_head;
+    memcpy(&ipaddr,IP_ADDR_ANY,sizeof(struct ip_addr));
+    prefix2mask((int)(rtm->rtm_dst_len)+(rtm->rtm_family == PF_INET?(32*3):0),&netmask);
+    if (attr[RTA_DST] != NULL) {
+        if (rtm->rtm_family == PF_INET && attr[RTA_DST]->nla_len == 8) {
+            ipaddr.addr[2]=IP64_PREFIX;
+            ipaddr.addr[3]=(*((int *)(attr[RTA_DST]+1)));
+        }
+        else if (rtm->rtm_family == PF_INET6 && attr[RTA_DST]->nla_len == 20) {
+            register int i;
+            for (i=0;i<4;i++)
+                ipaddr.addr[i]=(*(((int *)(attr[RTA_DST]+1))+i));
+        }
+        else
+            return NULL;
+    }
+    while (dp != NULL && !ip_addr_maskcmp(&ipaddr,&(dp->addr),&(dp->netmask)))
+        dp = dp->next;
+    if (dp != NULL)
+        return dp;
+}
+
+static void nl_dump1route(struct nlq_msg *msg, struct stack *stack, struct ip_route_list *irl, char family) {
+    struct ip_addr *ipaddr = &(irl->addr);
+    struct ip_addr *netmask = &(irl->netmask);
+    int i;
+    if (family == 0 ||
+            family == (ip_addr_is_v4comp(&(irl->addr))?PF_INET:PF_INET6)) {
+
+        /*printf("UNO route %x\n",irl->addr.addr[3]);*/
+        struct rtmsg rtm;
+        rtm.rtm_family= ip_addr_is_v4comp(&(irl->addr))?PF_INET:PF_INET6; 
+        if (netmask)
+            rtm.rtm_dst_len=mask2prefix(netmask)-(ip_addr_is_v4comp(&(irl->addr))?(32*3):0); 
+        else
+            rtm.rtm_dst_len=mask2prefix(&(irl->netmask))-(ip_addr_is_v4comp(&(irl->addr))?(32*3):0); 
+
+        rtm.rtm_src_len=0;
+        rtm.rtm_tos=0;
+        rtm.rtm_table=RT_TABLE_MAIN;
+        rtm.rtm_protocol=RTPROT_KERNEL;
+        rtm.rtm_scope=RT_SCOPE_UNIVERSE;
+        rtm.rtm_type=RTN_UNICAST;
+        /*rtm.rtm_flags=irl->flags; */
+        rtm.rtm_flags=0; 
+
+        nlq_add(msg,&rtm,sizeof(rtm));
+
+        //for (i=0; i< IP_ROUTE_ROUTE_OUT_TABLE_SIZE;i++)
+        //    if (ip_route_route_out_table[i] != NULL)
+        //        ip_route_route_out_table[i](i,irl,address,buf,offset);
+        // RTA_DST
+        // RTA_GATEWAY
+        int isv4=ip_addr_is_v4comp(&(irl->addr));
+        if (! isdefault(&(irl->addr))) {
+            if (isv4)
+            {
+                nlq_addattr(msg,RTA_DST, &(irl->addr.addr[3]),sizeof(u32_t));
+                nlq_addattr(msg,RTA_GATEWAY,&(irl->nexthop.addr[3]),sizeof(u32_t));
+            }
+            else
+            {
+                nlq_addattr(msg,RTA_DST, irl->addr.addr,sizeof(struct ip_addr));
+                nlq_addattr(msg,RTA_GATEWAY,&(irl->nexthop),sizeof(struct ip_addr));
+            }
+        }
+        // RTA_OIF
+        u32_t id=irl->netif->id;
+        nlq_addattr(msg,RTA_OIF, &id, sizeof(u32_t));
+        // RTA_PREFSRC
+        struct ip_addr *directaddr;
+        if (! isdefault(&(irl->addr))) 
+            directaddr= &(irl->addr);
+        else 
+            directaddr= &(irl->nexthop);
+        if (directaddr) {
+            struct ip_addr_list *srclist;
+
+            if (isv4) 
+                srclist=ip_addr_list_maskfind(irl->netif->addrs,directaddr);
+            else
+                srclist=ip_route_ipv6_select_source(irl->netif,directaddr);
+
+            if(srclist) {
+                if (isv4)
+                    nlq_addattr(msg,RTA_PREFSRC,&(srclist->ipaddr.addr[3]),sizeof(u32_t));
+                else
+                    nlq_addattr(msg,RTA_PREFSRC,srclist->ipaddr.addr,sizeof(struct ip_addr));
+            }
+        }
+    }
+}
+
+int ip_route_netlink_getroute(void *entry, struct nlmsghdr *msg, struct nlattr **attr, struct nlq_msg
+        **reply_msgq, void *stackinfo){
+    struct rtmsg *rtm=(struct rtmsg *)(msg+1);
+    char family=rtm->rtm_family;
+    struct stack *stack = (struct stack *) stackinfo;
+    if (entry == NULL) {
+        struct ip_route_list *dp = stack->ip_route_head;
+        while (dp != NULL) {
+            struct nlq_msg *newmsg = nlq_createmsg(RTM_NEWADDR, NLM_F_MULTI, msg->nlmsg_seq, 0);
+            nl_dump1route(newmsg, stack, dp, family);
+            nlq_complete_enqueue(newmsg, reply_msgq);
+            dp=dp->next;
+        }
+        return 0;
+    }
+    else {
+        struct nlq_msg *newmsg = nlq_createmsg(RTM_NEWROUTE, 0, msg->nlmsg_seq, 0);
+        nl_dump1route(newmsg, stack, entry, family);
+        nlq_complete_enqueue(newmsg, reply_msgq);
+        return 1;
+    }
+}
+
+int ip_route_handle_opts(struct rtmsg *rtm, struct ip_addr *ipaddr, struct ip_addr *netmask, struct
+        ip_addr *nexthop, struct netif **nip, struct nlattr **attr, struct stack *stack)
+{
+    int netid;
+	int family;
+    /* XXX controls TABLE_MAIN TYPE_UNICAST */
+    family=rtm->rtm_family;
+    memcpy(&ipaddr,IP_ADDR_ANY,sizeof(struct ip_addr));
+    memcpy(&nexthop,IP_ADDR_ANY,sizeof(struct ip_addr));
+    prefix2mask((int)(rtm->rtm_dst_len)+(rtm->rtm_family == PF_INET?(32*3):0),netmask);
+    if (family==PF_INET)
+        ipaddr->addr[2]=nexthop->addr[2]=IP64_PREFIX;
+
+    if (attr[RTA_DST] != NULL) {
+        /*printf("RTN_DST\n");*/
+        if (rtm->rtm_family == PF_INET && attr[RTA_DST]->nla_len == 8) {
+            ipaddr->addr[2]=IP64_PREFIX;
+            ipaddr->addr[3]=(*((int *)(attr[RTA_DST]+1)));
+        }
+        else if (rtm->rtm_family == PF_INET6 && attr[RTA_DST]->nla_len == 20) {
+            register int i;
+            for (i=0;i<4;i++)
+                ipaddr->addr[i]=(*(((int *)(attr[RTA_DST]+1))+i));
+        }
+        else
+            return -EINVAL;
+    }
+    if (attr[RTA_GATEWAY] != NULL) {
+        if (rtm->rtm_family == PF_INET && attr[RTA_GATEWAY]->nla_len == 8) {
+            nexthop->addr[2]=IP64_PREFIX;
+            nexthop->addr[3]=(*((int *)(attr[RTA_GATEWAY]+1)));
+        }
+        else if (rtm->rtm_family == PF_INET6 && attr[RTA_GATEWAY]->nla_len == 20) {
+            register int i;
+            for (i=0;i<4;i++)
+                nexthop->addr[i]=(*(((int *)(attr[RTA_GATEWAY]+1))+i));
+        }
+        else 
+            return -EINVAL;
+    }
+    if (attr[RTA_OIF] != NULL) {
+        if (attr[RTA_OIF]->nla_len != 8) {
+            return -EINVAL;
+        } 
+        else
+        {
+            netid=(*((int *)(attr[RTA_OIF]+1)));
+            *nip=netif_find_id(stack, netid);
+            if (*nip == NULL) {
+                //fprintf(stderr,"Route add/deladdr id error %d \n",netid);
+                //netlink_ackerror(msg,-ENODEV,buf,offset);
+                return -ENODEV;
+            }
+        }
+    }
+
+    if (*nip==NULL) {
+        /* XXX search the interface */
+        *nip=netif_find_direct_destination(stack, nexthop);
+    }
+    if (*nip == NULL) {
+        //fprintf(stderr,"Gateway unreachable\n");
+        //netlink_ackerror(msg,,buf,offset);
+        return -ENETUNREACH;
+    }
+
+    return 0;
+}
+
+int ip_route_netlink_addroute(struct nlmsghdr *msg, struct nlattr **attr, void *stackinfo) {
+	struct rtmsg *rtm=(struct rtmsg *)(msg+1);
+	struct ip_addr ipaddr,netmask,nexthop;
+	int netid;
+	struct netif *nip=NULL;
+    struct stack *stack = (struct stack *)stackinfo;
+    int flags = 0;
+    int rv;
+
+    rv = ip_route_handle_opts(rtm, &ipaddr, &netmask, &nexthop, &nip, attr, stack);
+    return ip_route_list_add(stack, &ipaddr,&netmask,&nexthop,nip,flags);
+}
+
+int ip_route_netlink_delroute(void *entry, struct nlmsghdr *msg, struct nlattr **attr, void *stackinfo){
+	struct rtmsg *rtm=(struct rtmsg *)(msg+1);
+	int netid;
+	struct netif *nip=NULL;
+    struct stack *stack = (struct stack *)stackinfo;
+    int flags = 0;
+    struct ip_route_list *ipl = (struct ip_route_list *) entry;
+
+    if (attr[RTA_OIF] != NULL) {
+        if (attr[RTA_OIF]->nla_len != 8) {
+            return -EINVAL;
+        } 
+        else
+        {
+            netid=(*((int *)(attr[RTA_OIF]+1)));
+            nip=netif_find_id(stack, netid);
+            if (nip == NULL) {
+                //fprintf(stderr,"Route add/deladdr id error %d \n",netid);
+                //netlink_ackerror(msg,-ENODEV,buf,offset);
+                return -ENODEV;
+            }
+        }
+    }
+
+    if (nip==NULL) {
+        /* XXX search the interface */
+        nip=netif_find_direct_destination(stack, &(ipl->nexthop));
+    }
+
+    if (nip == NULL) {
+        //fprintf(stderr,"Gateway unreachable\n");
+        //netlink_ackerror(msg,,buf,offset);
+        return -ENETUNREACH;
+    }
+
+    return ip_route_list_del(stack, &(ipl->addr),&(ipl->netmask),&(ipl->nexthop),nip,flags);
+}
+
+#if 0
 void
 ip_route_out_route_dst(int index,struct ip_route_list *irl,struct ip_addr *address,void * buf,int *offset)
 {
@@ -427,7 +671,9 @@ static void ip_route_netlink_out_route(struct nlmsghdr *msg,struct ip_route_list
 		netlink_addanswer(buf,&myoffset,msg,sizeof (struct nlmsghdr));
 	}
 }
+#endif
 
+#if 0
 void ip_route_netlink_getroute(struct stack *stack, struct nlmsghdr *msg,void * buf,int *offset)
 {
 	struct rtmsg *rtm=(struct rtmsg *)(msg+1);
@@ -598,6 +844,7 @@ void ip_route_netlink_adddelroute(struct stack *stack, struct nlmsghdr *msg,void
 	/* XXX convert error */
 	netlink_ackerror(msg,err,buf,offset);
 }
+#endif
 
 #endif
 

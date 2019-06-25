@@ -32,11 +32,14 @@
 #include "lwip/netif.h"
 #include "ipv6/lwip/ip_route.h"
 #include "ipv6/lwip/ip_addr.h"
+#include <libnlq.h>
 
 #define MAX_NL 4
 
 #define BUF_STDLEN 8192
 #define MAX_BUFLEN 32768
+#include <vpoll.h>
+#include <sys/epoll.h>
 
 struct netlinkbuf {
 	int length;
@@ -52,7 +55,8 @@ struct netlink {
 	u32_t pid;
 	struct sockaddr_nl name;
 	struct nlmsghdr hdr;
-	struct pbuf *answer[2];
+	//struct pbuf *answer[2];
+    struct nlq_msg *nl_msgq;
 	int sndbufsize;
 	int rcvbufsize;
 } nl_t[MAX_NL];
@@ -109,6 +113,7 @@ void prefix2mask(int prefix,struct ip_addr *netmask)
 			
 typedef void (*netlink_mgmt)(struct stack *stack, struct nlmsghdr *msg,void * buf,int *offset);
 
+#if 0
 #define NETLINK_IS_GET(X) ((X) % 4 == 2)
 static netlink_mgmt mgmt_table[]={
 	/* NEW/DEL/GET/SET link */
@@ -128,6 +133,16 @@ static netlink_mgmt mgmt_table[]={
 	NULL
 };
 #define MGMT_TABLE_SIZE (sizeof(mgmt_table)/sizeof(netlink_mgmt))
+#endif
+
+static nlq_request_handlers_table handlers_table = {
+    [RTMF_LINK]={netif_netlink_searchlink, netif_netlink_getlink, NULL/*netif_netlink_addlink*/,
+        NULL /*netif_netlink_dellink*/,  netif_netlink_setlink},
+    [RTMF_ADDR]={netif_netlink_searchaddr, netif_netlink_getaddr, netif_netlink_addaddr,
+        netif_netlink_deladdr, NULL},
+    [RTMF_ROUTE]={ip_route_netlink_searchroute, ip_route_netlink_getroute,
+        ip_route_netlink_addroute, ip_route_netlink_delroute, NULL}
+};
 
 void netlink_ackerror(void *msg,int ackerr,void *buf,int *offset)
 {
@@ -145,6 +160,7 @@ void netlink_ackerror(void *msg,int ackerr,void *buf,int *offset)
 	h->nlmsg_len=restorelen;
 }
 
+#if 0
 static void netlink_decode (struct stack *stack, void *msg,int size,int bufsize,struct pbuf **out,u32_t pid
 #if LWIP_CAPABILITIES
 		,int cap
@@ -191,7 +207,7 @@ static void netlink_decode (struct stack *stack, void *msg,int size,int bufsize,
 	}
 	mem_free(nlbuf.data);
 }
-
+#endif
 
 #if 0
 static void dump(unsigned char *data,int size)
@@ -230,8 +246,9 @@ netlink_open(struct stack *stack, int type,int proto)
 		nl_t[i].flags |= NL_ALLOC;
 		nl_t[i].proto=proto;
 		nl_t[i].pid=++pid_counter;
-		nl_t[i].answer[0]=NULL;
-		nl_t[i].answer[1]=NULL;
+		//nl_t[i].answer[0]=NULL;
+		//nl_t[i].answer[1]=NULL;
+        nl_t[i].nl_msgq = NULL;
 		nl_t[i].sndbufsize=BUF_STDLEN;
 		nl_t[i].rcvbufsize=BUF_STDLEN;
 		return (struct netconn *)(&nl_t[i]);
@@ -261,6 +278,7 @@ netlink_close(void *sock)
 	struct netlink *nl=sock;
 	/*printf("netlink_close\n");*/
 	nl->flags &= ~NL_ALLOC;
+    nlq_free(&(nl->nl_msgq));
 	return 0;
 }
 
@@ -273,47 +291,82 @@ netlink_connect(void *sock, struct sockaddr *name, socklen_t namelen)
 
 	int
 netlink_recvfrom(void *sock, void *mem, int len, unsigned int flags,
-		struct sockaddr *from, socklen_t *fromlen)
+		struct sockaddr *from, socklen_t *fromlen, int efd)
 {
-	struct netlink *nl=sock;
+    struct netlink *nl = (struct netlink *)sock;
+    ssize_t retval = 0;
+    ssize_t copylen = 0;
+    struct nlq_msg *headmsg = nlq_head(nl->nl_msgq);
+    //printk("vu_netlinktest_recv IN! len %d %p\n", len, headmsg);
+    if (headmsg == NULL) {
+        return -ENODATA;
+    }
+    if (len < headmsg->nlq_size) {
+        if (flags & MSG_TRUNC)
+            retval = headmsg->nlq_size;
+        else
+            retval = len;
+        copylen = len;
+    } else
+        retval = copylen = headmsg->nlq_size;
+    if (mem != NULL && copylen > 0)
+        memcpy(mem, headmsg->nlq_packet, copylen);
+    if (!(flags & MSG_PEEK)) {
+        nlq_dequeue(&nl->nl_msgq);
+        nlq_freemsg(headmsg);
+        if (nlq_length(nl->nl_msgq) == 0)
+            vpoll_ctl(efd,VPOLL_CTL_DELEVENTS,EPOLLIN);
+    }
+    if (*fromlen >= sizeof(struct sockaddr_nl)) {
+        struct sockaddr_nl *socknl = (struct sockaddr_nl *)from;
+        socknl->nl_family = AF_NETLINK;
+        socknl->nl_pad = 0;
+        socknl->nl_pid = 0;
+        socknl->nl_groups = 0;
+        *fromlen = sizeof(struct sockaddr_nl);
+    }
+    return retval;
+#if 0
+    struct netlink *nl=sock;
 
-	struct stack *stack = nl->stack;	
+    struct stack *stack = nl->stack;	
 
-	/*printf("netlink_recvfrom\n");*/
-	if (from) {
-		memset(from,0,*fromlen);
-		from->sa_family=PF_NETLINK;
-	}
-	if (nl->answer[0]==NULL) {
-		/*printf("netlink: answNULL\n");*/
-		return 0;
-	}
-	/* it is not able to split the answer into several messages */
-	else if (flags & MSG_PEEK) {
-		register int outlen=nl->answer[0]->tot_len;
-		/*printf("PEEK\n"); dump(mem,outlen);*/
-		memcpy(mem,nl->answer[0]->payload,(len < outlen) ? len : outlen);
-		return outlen;
-	}
-	else if (nl->answer[0]->tot_len > len) {
-		pbuf_free(nl->answer[0]);
-		nl->answer[0]=NULL;
-		if (nl->answer[1] != NULL) {
-			pbuf_free(nl->answer[1]);
-			nl->answer[1]=NULL;
-		}
-		/*printf("LEN %d\n",len);*/
-		return 0;
-	} 
-	else {
-		register int outlen=nl->answer[0]->tot_len;
-		memcpy(mem,nl->answer[0]->payload,outlen);
-		/*printf("ANSWER\n"); dump(mem,outlen);*/
-		pbuf_free(nl->answer[0]);
-		nl->answer[0]=nl->answer[1];
-		nl->answer[1]=NULL;
-		return outlen;
-	}
+    /*printf("netlink_recvfrom\n");*/
+    if (from) {
+        memset(from,0,*fromlen);
+        from->sa_family=PF_NETLINK;
+    }
+    if (nl->answer[0]==NULL) {
+        /*printf("netlink: answNULL\n");*/
+        return 0;
+    }
+    /* it is not able to split the answer into several messages */
+    else if (flags & MSG_PEEK) {
+        register int outlen=nl->answer[0]->tot_len;
+        /*printf("PEEK\n"); dump(mem,outlen);*/
+        memcpy(mem,nl->answer[0]->payload,(len < outlen) ? len : outlen);
+        return outlen;
+    }
+    else if (nl->answer[0]->tot_len > len) {
+        pbuf_free(nl->answer[0]);
+        nl->answer[0]=NULL;
+        if (nl->answer[1] != NULL) {
+            pbuf_free(nl->answer[1]);
+            nl->answer[1]=NULL;
+        }
+        /*printf("LEN %d\n",len);*/
+        return 0;
+    } 
+    else {
+        register int outlen=nl->answer[0]->tot_len;
+        memcpy(mem,nl->answer[0]->payload,outlen);
+        /*printf("ANSWER\n"); dump(mem,outlen);*/
+        pbuf_free(nl->answer[0]);
+        nl->answer[0]=nl->answer[1];
+        nl->answer[1]=NULL;
+        return outlen;
+    }
+#endif
 }
 
 /* netlink_send is the only function that reads/sets stack parameters like
@@ -328,6 +381,7 @@ struct netlink_send_data {
 #endif
 };
 
+#if 0
 static void netlink_sync_send(void *arg)
 {
 	struct netlink_send_data *nlss_data=arg;
@@ -346,18 +400,29 @@ static void netlink_sync_send(void *arg)
 	memcpy(&(nl->hdr),nlss_data->data,sizeof(struct nlmsghdr));
 	/* } */
 }
+#endif
 
 	int
-netlink_send(void *sock, void *data, int size, unsigned int flags)
+netlink_send(void *sock, void *data, int size, unsigned int flags, int efd)
 {
 	struct netlink *nl=sock;
 	struct stack *stack = nl->stack;
-	struct netlink_send_data nlss_data;
-	err_t rv;
-	nlss_data.nl = nl;
-	nlss_data.data = data;
-	nlss_data.size = size;
+    struct nlmsghdr *msg = (struct nlmsghdr *)data;
 
+    while (NLMSG_OK(msg, size)) {
+        struct nlq_msg *msgq;
+        msgq = nlq_process_rtrequest(msg, handlers_table, stack);
+        while (msgq != NULL) {
+            struct nlq_msg *msg = nlq_dequeue(&msgq);
+            msg->nlq_packet->nlmsg_pid = nl->pid;
+            nlq_enqueue(msg, &nl->nl_msgq);
+        }
+        msg = NLMSG_NEXT(msg, size);
+    }
+
+    if (nlq_length(nl->nl_msgq) > 0)
+        vpoll_ctl(efd,VPOLL_CTL_ADDEVENTS, EPOLLIN);
+#if 0
 #if LWIP_CAPABILITIES
 	if (stack->stack_capfun)
 		nlss_data.cap=stack->stack_capfun();
@@ -366,17 +431,17 @@ netlink_send(void *sock, void *data, int size, unsigned int flags)
 #endif
 	/* one single answer pending, multiple requests return one long answer */
 	rv = tcpip_callback(stack, netlink_sync_send, &nlss_data, SYNC);
+    #endif
 
-	return 0;
+	return size;
 }
 
 	int
 netlink_sendto(void *sock, void *data, int size, unsigned int flags,
-		struct sockaddr *to, socklen_t tolen)
+		struct sockaddr *to, socklen_t tolen, int efd)
 {
 	/*printf("netlink_sendto\n");*/
-	netlink_send(sock,data,size,flags);
-	return 0;
+	return netlink_send(sock,data,size,flags,efd);
 }
 
 	int

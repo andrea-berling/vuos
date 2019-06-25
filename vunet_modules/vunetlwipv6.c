@@ -308,7 +308,7 @@ struct vunet_operations vunet_ops={
 	//VUNETLWIPV6S(read),
 	//VUNETLWIPV6S(write),
 	.close = lwip_close,
-	.epoll_ctl = lwip_epoll_ctl,
+	.epoll_ctl = epoll_ctl
 	//VUNETLWIPV6(event_subscribe),
 };
 
