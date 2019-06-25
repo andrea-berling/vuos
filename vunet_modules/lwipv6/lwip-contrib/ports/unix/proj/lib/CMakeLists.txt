@@ -76,7 +76,7 @@ add_library(lwipv6 SHARED
 set_target_properties(lwipv6    PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION 1 PUBLIC_HEADER
     ${LWIPARCH}/include/lwipv6.h)
 
-target_link_libraries(lwipv6 vpoll fduserdata)
+target_link_libraries(lwipv6 vpoll fduserdata nlq)
 
 install(TARGETS lwipv6
     LIBRARY DESTINATION ${INSTALL_LIBDIR}

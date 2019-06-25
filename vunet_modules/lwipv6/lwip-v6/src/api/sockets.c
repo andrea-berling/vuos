@@ -259,8 +259,7 @@ done_with_socket(struct lwip_socket *sock)
 {
     if (sock)
     {
-        LWIP_DEBUGF(SOCKETS_DEBUG, ("[%d:%d]: done_with_socket(%d)\n",getpid(),pthread_self(),sock->efd));
-        //LWIP_DEBUGF(SOCKETS_DEBUG, ("done_with_socket(%d)\n", sock->efd));
+        LWIP_DEBUGF(SOCKETS_DEBUG, ("done_with_socket(%d)\n",sock->efd));
         fduserdata_put(sock);
     }
 }
@@ -268,7 +267,7 @@ done_with_socket(struct lwip_socket *sock)
 	static struct lwip_socket *
 get_socket(int s)
 {
-    LWIP_DEBUGF(SOCKETS_DEBUG, ("[%d:%d]: get_socket(%d)\n",getpid(),pthread_self(),s));
+    LWIP_DEBUGF(SOCKETS_DEBUG, ("get_socket(%d)\n",s));
     struct lwip_socket *sock = fduserdata_get(sockets_table,s);
 
 	if (sock == NULL) {
@@ -309,8 +308,7 @@ alloc_socket(struct netconn *newconn,u16_t family)
     efd = vpoll_create(0,EFD_CLOEXEC);
     if (efd < 0)
         return -1;
-
-	this=fduserdata_new(sockets_table,efd,struct lwip_socket);
+    this=fduserdata_new(sockets_table,efd,struct lwip_socket);
 	if (!this) {
 		set_errno(ENOMEM);
 		return -1;
@@ -324,15 +322,13 @@ alloc_socket(struct netconn *newconn,u16_t family)
 		this->flags = O_RDWR;
 		this->err = 0;
         this->efd = efd;
-        // TODO remember to write lwip_stat/lwip_fstat
-        // TODO rember to change select, poll, epoll_ctl as well
 
 		/* Protect socket array */
 		//sys_sem_wait(socksem);
 
 		/* Create the sockets_table, if not already created */
         vpoll_ctl(this->efd,VPOLL_CTL_ADDEVENTS,EPOLLOUT); /* TCP send buf is empty, ok to send */
-        done_with_socket(this);
+        fduserdata_put(this);
         return efd;
 #if 0
 			if (i >= sockets_len) {
@@ -627,10 +623,12 @@ lwip_close(int s)
 	else 
 #endif
 	{
+        done_with_socket(sock);
 		netconn_delete(sock->conn);
 		if (sock->lastdata) {
 			netbuf_delete(sock->lastdata);
 		}
+        sock = get_socket(s);
 		sock->lastdata = NULL;
 		sock->lastoffset = 0;
 		sock->conn = NULL;
@@ -750,7 +748,7 @@ lwip_recvfrom(int s, void *mem, int len, unsigned int flags,
 	struct ip_addr *addr;
 	u16_t port;
 
-	LWIP_DEBUGF(SOCKETS_DEBUG, ("[%d:%d] lwip_recvfrom(%d, %p, %d, 0x%x, ..)\n", getpid(), pthread_self(), s, mem, len, flags));
+	LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_recvfrom(%d, %p, %d, 0x%x, ..)\n", s, mem, len, flags));
 	sock = get_socket(s);
 	if (!sock) {
 		set_errno(EBADF);
@@ -760,9 +758,15 @@ lwip_recvfrom(int s, void *mem, int len, unsigned int flags,
 #if LWIP_NL
 	if (sock->family == PF_NETLINK) {
         // TODO check that the critical section of fduserdata doesn't cause any trouble with this
-		int rv = netlink_recvfrom(sock->conn,mem,len,flags,from,fromlen);
+		int rv = netlink_recvfrom(sock->conn,mem,len,flags,from,fromlen,sock->efd);
         done_with_socket(sock);
-        return rv;
+        if (rv < 0)
+        {
+            sock_set_errno(sock,-rv);
+            return -1;
+        }
+        else
+            return rv;
 	} else
 #endif
 	{
@@ -975,7 +979,9 @@ lwip_send(int s, void *data, int size, unsigned int flags)
 
 #if LWIP_NL
 	if (sock->family == PF_NETLINK)  {
-		int rv = netlink_send(sock->conn,data,size,flags);
+        // TODO Right now the return value is always 0. Should I return the number of sent bytes
+        // when handling netlink?
+		int rv = netlink_send(sock->conn,data,size,flags,sock->efd);
         done_with_socket(sock);
         return rv;
 	}
@@ -1007,13 +1013,17 @@ lwip_send(int s, void *data, int size, unsigned int flags)
 				netbuf_ref(buf, data, size);
 
 				/* send the data */
+                done_with_socket(sock);
 				err = netconn_send(sock->conn, buf);
+                sock = get_socket(s);
 
 				/* deallocated the buffer */
 				netbuf_delete(buf);
 				break;
 			case NETCONN_TCP:
+                done_with_socket(sock);
 				err = netconn_write(sock->conn, data, size, NETCONN_COPY);
+                sock = get_socket(s);
 				break;
 			default:
 				err = ERR_ARG;
@@ -1050,7 +1060,7 @@ lwip_sendto(int s, void *data, int size, unsigned int flags,
 
 #if LWIP_NL
 	if (sock->family == PF_NETLINK)  {
-		int rv = netlink_sendto(sock->conn,data,size,flags,to,tolen);
+		int rv = netlink_sendto(sock->conn,data,size,flags,to,tolen,sock->efd);
         done_with_socket(sock);
         return rv;
 	}
@@ -1058,7 +1068,9 @@ lwip_sendto(int s, void *data, int size, unsigned int flags,
 #endif
 	{
 		/* get the peer if currently connected */
+        done_with_socket(sock);
 		connected = (netconn_peer(sock->conn, &addr, &port) == ERR_OK);
+        sock = get_socket(s);
 
 		if (tolen>0) {
 			if (sock->family == PF_INET) {
@@ -1079,7 +1091,9 @@ lwip_sendto(int s, void *data, int size, unsigned int flags,
 			ip_addr_debug_print(SOCKETS_DEBUG, &remote_addr);
 			LWIP_DEBUGF(SOCKETS_DEBUG, (" port=%u\n", ntohs(remote_port)));
 
-			netconn_connect(sock->conn, &remote_addr, ntohs(remote_port));
+            done_with_socket(sock);
+            // TODO I should probably release the sockets inside the netconn_connect
+            netconn_connect(sock->conn, &remote_addr, ntohs(remote_port));
 		}
 
 		ret = lwip_send(s, data, size, flags);
@@ -1087,9 +1101,14 @@ lwip_sendto(int s, void *data, int size, unsigned int flags,
 		/* reset the remote address and port number
 		   of the connection */
 		if (connected) {
-			if (tolen>0) netconn_connect(sock->conn, &addr, port);
+			if (tolen>0) 
+            {
+                netconn_connect(sock->conn, &addr, port);
+            }
 		} else
-			netconn_disconnect(sock->conn);
+        {
+            netconn_disconnect(sock->conn);
+        }
         done_with_socket(sock);
 		return ret;
 	}
@@ -1382,7 +1401,7 @@ event_callback(struct netconn *conn, enum netconn_evt evt, u16_t len)
 	int s;
 	struct lwip_socket *sock;
 
-	//printf("event_callback %p %d\n",conn,evt);
+	LWIP_DEBUGF(SOCKETS_DEBUG,("event_callback %p %d\n",conn,evt));
 	/* Get socket */
 	if (conn)
 	{
@@ -1787,7 +1806,7 @@ lwip_getsockopt (int s, int level, int optname, void *optval, socklen_t *optlen)
 				case SO_SNDBUF:
 					*(int *)optval = 262144;
 					break;
-			}  /* switch */
+            }  /* switch */
 			break;
 
 			/* Level: IPPROTO_IP */
@@ -2298,8 +2317,8 @@ int lwip_fcntl64(int s, int cmd, long arg)
             done_with_socket(sock);
 			return sock->flags;
 		case F_SETFL:
-            done_with_socket(sock);
 			sock->flags = (sock->flags & ~FCNTL_SETFL_MASK) | (arg & FCNTL_SETFL_MASK);
+            done_with_socket(sock);
 			return 0;
 		default:
 			return -1;
@@ -2761,7 +2780,7 @@ ssize_t lwip_readv(int s, struct iovec *vector, int count)
 	return ret;
 }
 
-int fstat(int fd, struct stat *buf){
+int lwip_fstat(int fd, struct stat *buf){
     if (buf)
     {
         int rv = fstat(fd,buf);

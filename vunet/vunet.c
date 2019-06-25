@@ -304,19 +304,20 @@ ssize_t vu_vunet_recvfrom(int sockfd, void *buf, size_t len, int flags,
   if (current_vnetfd->vunet->netops->recvmsg == NULL)
     return errno = ENOSYS, -1;
   else {
-		struct iovec iov[] = {{buf, len}};
-		struct msghdr msgh = {(void *) src_addr, *addrlen, iov, 1, msg_control, 0, 0};
-		if (msg_controllen != NULL)
-			msgh.msg_controllen = *msg_controllen;
-    int retval = current_vnetfd->vunet->netops->recvmsg(sockfd, &msgh, flags);
-		if (retval >= 0) {
-			if (addrlen != NULL)
-				*addrlen = msgh.msg_namelen;
-			if (msg_controllen != NULL)
-				*msg_controllen = msgh.msg_controllen;
-		}
-		return retval;
-	}
+      struct iovec iov[] = {{buf, len}};
+      struct msghdr msgh = {(void *) src_addr, *addrlen, iov, 1, msg_control, 0, 0};
+      if (msg_controllen != NULL)
+          msgh.msg_controllen = *msg_controllen;
+      int retval = current_vnetfd->vunet->netops->recvmsg(sockfd, &msgh, flags);
+      printkdebug(N, "Return value: %d", retval);
+      if (retval >= 0) {
+          if (addrlen != NULL)
+              *addrlen = msgh.msg_namelen;
+          if (msg_controllen != NULL)
+              *msg_controllen = msgh.msg_controllen;
+      }
+      return retval;
+  }
 }
 
 int vu_vunet_getsockopt(int sockfd, int level, int optname,
