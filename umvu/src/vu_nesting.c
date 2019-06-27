@@ -18,6 +18,9 @@
  *
  */
 
+/* Nested virtualization support through module self-virtualization.
+	 This source code uses libpurelibc */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <dlfcn.h>
@@ -38,10 +41,12 @@
 
 #define PURELIBC_LIB "libpurelibc.so"
 
+/* self-virtualization syscall request capturing function. */
+/* wrappers for nested vritualization are the same used by vu_execute.c */
 static long int capture_nested_syscall(long int syscall_number, ...) {
 	va_list ap;
 	struct syscall_extra_t extra;
-	struct syscall_descriptor_t sd = {.extra = &extra};
+	struct syscall_descriptor_t sd = {.extra = &extra, .inout = NULL};
 	struct vuht_entry_t *ht;
 	int sysno = vu_arch_table[syscall_number];
 	struct syscall_tab_entry *tab_entry = &vu_syscall_table[sysno];
@@ -85,6 +90,7 @@ static long int capture_nested_syscall(long int syscall_number, ...) {
 			tab_entry->wrapoutf(ht, &sd);
 		else
 			sd.ret_value = sd.orig_ret_value;
+		sd.inout = NULL;
 	}
 	ret_value = sd.ret_value;
 	if (ht != NULL)
@@ -155,6 +161,8 @@ void vu_nesting_enable(void) {
 
 void vu_nesting_init(int argc, char **argv) {
 	char *ld_preload = getenv("LD_PRELOAD");
+	/* continue if purelibc is loaded, otherwise add LD_PRELOAD to the
+		 environment and reload the hypervisor by execv("/proc/self/exe", argv); */
 	if (ld_preload != NULL && strcmp(ld_preload, PURELIBC_LIB) == 0) {
 #if 0
 #pragma GCC diagnostic push
@@ -170,6 +178,7 @@ void vu_nesting_init(int argc, char **argv) {
 		if (setenv("LD_PRELOAD", PURELIBC_LIB, 1) == 0) {
 			execv("/proc/self/exe", argv);
 		}
+		printk(KERN_ERR "Purelibc cannot be loaded, option disabled\n");
 	}
 }
 

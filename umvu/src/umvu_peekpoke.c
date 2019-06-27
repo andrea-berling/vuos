@@ -42,11 +42,11 @@ static __thread unsigned int tracee_tid;
 #if defined(__x86_64__)
 void umvu_peek_syscall(struct user_regs_struct *regs,
 		struct syscall_descriptor_t *syscall_desc,
-		syscall_state_t sys_state)
+		peekpokeop_t op)
 {
 	if (regs && syscall_desc) {
-		if (sys_state == IN_SYSCALL) {
-			syscall_desc->orig_syscall_number = 
+		if (op == PEEK_ARGS) {
+			syscall_desc->orig_syscall_number =
 				syscall_desc->syscall_number = regs->orig_rax;
 			syscall_desc->syscall_args[0] = regs->rdi;
 			syscall_desc->syscall_args[1] = regs->rsi;
@@ -63,11 +63,11 @@ void umvu_peek_syscall(struct user_regs_struct *regs,
 
 int umvu_poke_syscall(struct user_regs_struct *regs,
 		struct syscall_descriptor_t *syscall_desc,
-		syscall_state_t sys_state)
+		peekpokeop_t op)
 {
 	if (regs && syscall_desc) {
-		switch (sys_state) {
-			case IN_SYSCALL:
+		switch (op) {
+			case POKE_ARGS:
 				/* regs->rsp is missing as stack pointer should not be modified */
 				if (regs->orig_rax == (unsigned) syscall_desc->syscall_number &&
 						regs->rdi == syscall_desc->syscall_args[0] &&
@@ -87,13 +87,13 @@ int umvu_poke_syscall(struct user_regs_struct *regs,
 				regs->r9 = syscall_desc->syscall_args[5];
 				regs->rip = syscall_desc->prog_counter;
 				break;
-			case OUT_SYSCALL:
+			case POKE_RETVALUE:
 				if (regs->rax == syscall_desc->ret_value)
 					return 0;
 				regs->rax = syscall_desc->ret_value;
 				break;
-			case DURING_SYSCALL:
-				regs->orig_rax = syscall_desc->syscall_number;
+			case SKIP_SETRETVALUE:
+				regs->orig_rax = -1;
 				regs->rax = syscall_desc->ret_value;
 				break;
 		}
@@ -108,11 +108,11 @@ int umvu_poke_syscall(struct user_regs_struct *regs,
 
 #endif
 
-void umvu_settid(int tid) {
+void umvu_settid(pid_t tid) {
 	tracee_tid = tid;
 }
 
-unsigned int umvu_gettid()
+pid_t umvu_gettid()
 {
 	return tracee_tid;
 }
@@ -128,7 +128,7 @@ void umvu_block(struct syscall_descriptor_t *sd) {
 	sd->syscall_args[2] = -1;
 }
 
-/* return len or the offset ofthe next page boundary, whatever
+/* return len or the offset of the next page boundary, whatever
 	 is nearer to addr */
 static inline long compute_chunk_len(uintptr_t addr, size_t len) {
 	unsigned long chunk_len = len > page_size ? page_size : len;
@@ -148,7 +148,7 @@ int umvu_peek_str(uintptr_t addr, void *buf, size_t datalen)
 			struct iovec local_iov = {cbuf, chunk_len};
 			struct iovec remote_iov = {(void *) addr, chunk_len};
 			int rv=process_vm_readv(tracee_tid, &local_iov, 1, &remote_iov, 1, 0);
-			if (rv != (int) chunk_len) 
+			if (rv != (int) chunk_len)
 				return -1;
 			else {
 				unsigned int r;

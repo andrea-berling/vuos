@@ -31,7 +31,7 @@
 #include <path_utils.h>
 #include <syscall_names.h>
 #include <unistd.h>
-#include <sys/syscall.h> 
+#include <sys/syscall.h>
 #include <r_table.h>
 #include <vu_log.h>
 #include <vu_execute.h>
@@ -43,6 +43,7 @@ struct vuht_entry_t *choice_NULL(struct syscall_descriptor_t *sd) {
 	return NULL;
 }
 
+/* default (dummy) wrappers */
 void wi_NULL(struct vuht_entry_t *ht, struct syscall_descriptor_t *sd) {
 	//printk("UNMANAGED %s\n", syscallname(sd->syscall_number));
 }
@@ -50,13 +51,16 @@ void wi_NULL(struct vuht_entry_t *ht, struct syscall_descriptor_t *sd) {
 void wd_NULL(struct vuht_entry_t *ht, struct syscall_descriptor_t *sd) {
 }
 
+/* a dummy output wrappermust copy the return value */
 void wo_NULL(struct vuht_entry_t *ht, struct syscall_descriptor_t *sd) {
 	sd->ret_value = sd->orig_ret_value;
 }
 
+/* default wrapper for virtual system calls */
 void vw_NULL(struct vuht_entry_t *ht, struct syscall_descriptor_t *sd) {
 }
 
+/* set the syscall_extra_t sturcture fields */
 static inline void set_extra (
 		struct syscall_extra_t *extra,
 		struct syscall_descriptor_t *sd,
@@ -76,6 +80,7 @@ static inline void execute_cleanup (struct vuht_entry_t *ht, struct syscall_desc
 	xfree(sd->extra->path);
 }
 
+/* vu_syscall_execute dispatches the syscall requests to the modules */
 void vu_syscall_execute(syscall_state_t state, struct syscall_descriptor_t *sd) {
 	static __thread struct syscall_extra_t extra;
 	struct vuht_entry_t *ht;
@@ -90,7 +95,7 @@ void vu_syscall_execute(syscall_state_t state, struct syscall_descriptor_t *sd) 
 		switch (state) {
 			case IN_SYSCALL:
 				set_extra(&extra, sd, get_syspath);
-				printkdebug(s, "IN %d (%d) %s %s %ld", umvu_gettid(), native_syscall(__NR_gettid), 
+				printkdebug(s, "IN %d (%d) %s %s %ld", umvu_gettid(), native_syscall(__NR_gettid),
 						syscallname(sd->syscall_number), sd->extra->path, get_vepoch());
 				ht = sd->extra->ht = tab_entry->choicef(sd);
 				if (sd->action == SKIPIT)
@@ -106,7 +111,7 @@ void vu_syscall_execute(syscall_state_t state, struct syscall_descriptor_t *sd) 
 				break;
 			case DURING_SYSCALL:
 				ht = sd->extra->ht;
-				printkdebug(s, "DURING %d %s %s", umvu_gettid(), 
+				printkdebug(s, "DURING %d %s %s", umvu_gettid(),
 						syscallname(sd->syscall_number), sd->extra->path);
 				tab_entry->wrapduringf(ht, sd);
 				printkdebug(a,"DURING %s", action_strings[sd->action % 0xf]);
@@ -115,7 +120,7 @@ void vu_syscall_execute(syscall_state_t state, struct syscall_descriptor_t *sd) 
 				break;
 			case OUT_SYSCALL:
 				ht = sd->extra->ht;
-				printkdebug(s, "OUT %d %s %s", umvu_gettid(), 
+				printkdebug(s, "OUT %d %s %s", umvu_gettid(),
 						syscallname(sd->syscall_number), sd->extra->path);
 				tab_entry->wrapoutf(ht, sd);
 				execute_cleanup(ht,sd);
@@ -137,7 +142,7 @@ void vu_syscall_execute(syscall_state_t state, struct syscall_descriptor_t *sd) 
 	set_thread_sd(ssd);
 }
 
-__attribute__((constructor)) 
+__attribute__((constructor))
 	static void init(void) {
 		debug_set_name(s, "SYSCALL");
 		debug_set_name(a, "ACTION");
