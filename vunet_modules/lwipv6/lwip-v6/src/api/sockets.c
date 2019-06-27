@@ -146,7 +146,7 @@ FDUSERDATA *sockets_table;
 #endif
 
 //static sys_sem_t socksem = 0;
-static sys_sem_t selectsem = 0;
+//static sys_sem_t selectsem = 0;
 
 static u16_t so_map[]={
 	0, /*not used */
@@ -539,7 +539,6 @@ lwip_bind(int s, struct sockaddr *name, socklen_t namelen)
 		return -1;
 	}
 #if LWIP_NL
-    // TODO come back to this when integrating libnlq
 	if (sock->family == PF_NETLINK) {
 		netlink_bind(sock->conn,name,namelen); // always returns 0
         done_with_socket(sock);
@@ -600,17 +599,9 @@ lwip_close(int s)
 	int err=0;
 
 	LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_close(%d)\n", s));
-#if 0
-	if (!socksem)
-		socksem = sys_sem_new(1);
-
-	/* We cannot allow multiple closes of the same socket. */
-	sys_sem_wait(socksem);
-#endif
 
 	sock = get_socket(s);
 	if (!sock) {
-		//sys_sem_signal(socksem);
 		set_errno(EBADF);
 		return -1;
 	}
@@ -720,6 +711,7 @@ lwip_listen(int s, int backlog)
 			|| sock->family == PF_PACKET
 #endif
 	   ) {
+        if (sock) done_with_socket(sock);
 		set_errno(EBADF);
 		return -1;
 	}
@@ -759,14 +751,17 @@ lwip_recvfrom(int s, void *mem, int len, unsigned int flags,
 	if (sock->family == PF_NETLINK) {
         // TODO check that the critical section of fduserdata doesn't cause any trouble with this
 		int rv = netlink_recvfrom(sock->conn,mem,len,flags,from,fromlen,sock->efd);
-        done_with_socket(sock);
         if (rv < 0)
         {
             sock_set_errno(sock,-rv);
+            done_with_socket(sock);
             return -1;
         }
         else
+        {
+            done_with_socket(sock);
             return rv;
+        }
 	} else
 #endif
 	{
@@ -902,8 +897,8 @@ lwip_recvfrom(int s, void *mem, int len, unsigned int flags,
 			netbuf_delete(buf);
 		}
 
-        done_with_socket(sock);
 		sock_set_errno(sock, 0);
+        done_with_socket(sock);
 		if (flags & MSG_TRUNC) 
 			return buflen;
 		else
@@ -979,8 +974,7 @@ lwip_send(int s, void *data, int size, unsigned int flags)
 
 #if LWIP_NL
 	if (sock->family == PF_NETLINK)  {
-        // TODO Right now the return value is always 0. Should I return the number of sent bytes
-        // when handling netlink?
+        // TODO Return the right value with netlink send
 		int rv = netlink_send(sock->conn,data,size,flags,sock->efd);
         done_with_socket(sock);
         return rv;
@@ -1297,6 +1291,7 @@ pfdset(int max, fd_set *fds)
 #endif
 
 
+#if 0
 struct um_sel_wait {
 	void (* cb)(); 
 	void *arg; 
@@ -1305,7 +1300,9 @@ struct um_sel_wait {
 	struct um_sel_wait *next;
 };
 static struct um_sel_wait *um_sel_head=NULL;
+#endif
 
+#if 0
 static void um_sel_add(void (* cb)(), void *arg, int fd, int events)
 {
 	struct um_sel_wait *new=(struct um_sel_wait *)mem_malloc(sizeof(struct um_sel_wait));
@@ -1365,6 +1362,7 @@ static void um_sel_signal(int fd, int events)
 	//printf("UMSELECT SIGNAL fd %d events %x\n",fd,events);
 	um_sel_head=um_sel_rec_signal(um_sel_head,fd,events);
 }
+#endif
 
 #if 0
 int lwip_event_subscribe(void (* cb)(), void *arg, int fd, int events)
@@ -1433,11 +1431,6 @@ event_callback(struct netconn *conn, enum netconn_evt evt, u16_t len)
 	else
 		return;
 
-    // TODO indagate this selectsem
-	if (!selectsem)
-		selectsem = sys_sem_new(1);
-
-	sys_sem_wait(selectsem);
 	/* Set event as required */
 	switch (evt)
 	{
@@ -1462,7 +1455,6 @@ event_callback(struct netconn *conn, enum netconn_evt evt, u16_t len)
 	//printf("EVENT fd %d(%d) R%d S%d\n",s,evt,sock->rcvevent,sock->sendevent);
     done_with_socket(sock);
     vpoll_ctl(efd,VPOLL_CTL_SETEVENTS,events);
-	sys_sem_signal(selectsem);
 }
 
 	int
@@ -1473,16 +1465,9 @@ lwip_shutdown(int s, int how)
 	u16_t perm;
 
 	LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_shutdown(%d, how=%d)\n", s, how));
-#if 0
-	if (!socksem)
-		socksem = sys_sem_new(1);
-
-	sys_sem_wait(socksem);
-#endif
 
 	sock = get_socket(s);
 	if (!sock) {
-		//sys_sem_signal(socksem);
 		set_errno(EBADF);
 		return -1;
 	}
@@ -1492,7 +1477,6 @@ lwip_shutdown(int s, int how)
 	sock->flags = (sock->flags & ~O_ACCMODE) | ((perm - 1) & O_ACCMODE);
 
     done_with_socket(sock);
-	//sys_sem_signal(socksem);
 	return 0;
 }
 
@@ -1512,6 +1496,7 @@ lwip_getpeername (int s, struct sockaddr *name, socklen_t *namelen)
 			|| sock->family == PF_PACKET
 #endif
 	   ) {
+        if (sock) done_with_socket(sock);
 		set_errno(EBADF);
 		return -1;
 	}
@@ -1644,12 +1629,15 @@ lwip_getsockopt (int s, int level, int optname, void *optval, socklen_t *optlen)
 #if LWIP_NL
 	if(sock->family == PF_NETLINK) {
 		int err=netlink_getsockopt(sock->conn, level, optname, optval, optlen); 
-        done_with_socket(sock);
 		if (err != 0) {
 			sock_set_errno(sock, err);
+            done_with_socket(sock);
 			return -1;
 		} else
+        {
+            done_with_socket(sock);
 			return 0;
+        }
 	}
 #endif
 
@@ -1873,12 +1861,15 @@ lwip_setsockopt (int s, int level, int optname, const void *optval, socklen_t op
 #if LWIP_NL
 	if(sock->family == PF_NETLINK) {
 		int err=netlink_setsockopt(sock->conn, level, optname, optval, optlen);
-        done_with_socket(sock);
 		if (err != 0) {
+            done_with_socket(sock);
 			sock_set_errno(sock, err);
 			return -1;
 		} else
+        {
+            done_with_socket(sock);
 			return 0;
+        }
 	}
 #endif
 
@@ -2048,8 +2039,6 @@ lwip_setsockopt (int s, int level, int optname, const void *optval, socklen_t op
 		return -1;
 	}
 
-
-
 	/* Now do the actual option processing */
 
 	switch(level) {
@@ -2188,6 +2177,7 @@ int lwip_ioctl(int s, unsigned long cmd, void *argp)
 			|| sock->family == PF_SOCKET
 #endif
 	   ) {
+        if (sock) done_with_socket(sock);
 		LWIP_DEBUGF(SOCKETS_DEBUG, ("lwip_ioctl(%d, %u,... ) BADF\n", s, cmd));
 		set_errno(EBADF);
 		return -1;
@@ -2308,19 +2298,24 @@ int lwip_fcntl64(int s, int cmd, long arg)
 			|| sock->family == PF_SOCKET
 #endif
 	   ) {
+        if (sock) done_with_socket(sock);
 		set_errno(EBADF);
 		return -1;
 	}
 
 	switch (cmd) {
 		case F_GETFL:
-            done_with_socket(sock);
-			return sock->flags;
+            {
+                u16_t flags = sock->flags;
+                done_with_socket(sock);
+                return flags;
+            }
 		case F_SETFL:
 			sock->flags = (sock->flags & ~FCNTL_SETFL_MASK) | (arg & FCNTL_SETFL_MASK);
             done_with_socket(sock);
 			return 0;
 		default:
+            done_with_socket(sock);
 			return -1;
 	}
 }
@@ -2379,10 +2374,12 @@ static int fdsplit(int max,
 }
 
 
+#if 0
 void lwip_pipecb(int *fdp)
 {
 	write(fdp[1],"\0",1);
 }
+#endif
 
 /*
  * Tue 04 Jun 2019 11:05:49 PM CEST
@@ -2426,7 +2423,7 @@ int lwip_pselect(int maxfdp1, fd_set *readset, fd_set *writeset, fd_set *excepts
     struct epoll_event revents[maxfdp1];
     memset(revents,-1,maxfdp1*sizeof(struct epoll_event));
     epfd = epoll_create1(EPOLL_CLOEXEC);
-    // Errors from epoll are not "translated" into errors for pselect. Should probably fix this
+    // TODO Errors from epoll are not "translated" into errors for pselect. Should probably fix this
     if (epfd == -1)
         return -1;
     for (i=0;i<maxfdp1;i++) {
@@ -2438,8 +2435,6 @@ int lwip_pselect(int maxfdp1, fd_set *readset, fd_set *writeset, fd_set *excepts
         {
             int fd = i;
             ev.data.fd = fd;
-            // if ((p_sock=get_socket(i))!=NULL) 
-            //     fd = p_sock->efd;
             if ((epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &ev)) == -1)
                 return -1;
         }
@@ -2656,24 +2651,6 @@ int lwip_ppoll(struct pollfd *fds, nfds_t nfds,
 
 	return rv;
 }
-
-//int lwip_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
-//{
-//    // Mon 10 Jun 2019 03:03:02 PM CEST
-//    // No check is made on whether event != NULL. Should probably change that
-//    if (epfd > -1 && fd > -1)
-//    {
-//        // struct lwip_socket *p_sock = get_socket(fd);
-//        // if (p_sock != NULL)
-//        //     fd = p_sock->efd;
-//        return epoll_ctl(epfd,op,fd,event);
-//    }
-//    else
-//    {
-//        set_errno(EBADF);
-//        return -1;
-//    }
-//}
 
 int lwip_poll(struct pollfd *fds, nfds_t nfds, int timeout) {
 	int rv;
