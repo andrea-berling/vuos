@@ -1,0 +1,3 @@
+[submodule "vunet_modules/lwip"]
+	path = vunet_modules/lwip
+	url = http://git.savannah.nongnu.org/git/lwip.git
