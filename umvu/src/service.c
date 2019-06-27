@@ -28,7 +28,7 @@
 
 /* helper functions for modules */
 
-unsigned int vu_mod_gettid() {
+pid_t vu_mod_gettid() {
 	return umvu_gettid();
 }
 
@@ -56,6 +56,8 @@ void vu_mod_setht(struct vuht_entry_t *ht) {
 	fatal(sd->extra);
 	sd->extra->ht = ht;
 }
+
+/* modules are not aware of direct or nested calls */
 
 void vu_mod_peek_str(void *addr, void *buf, size_t datalen) {
 	struct syscall_descriptor_t *sd = get_thread_sd();

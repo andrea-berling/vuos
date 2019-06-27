@@ -32,17 +32,18 @@
 
 #define UPDATABLE_FLAGS (O_APPEND | O_ASYNC | O_DIRECT | O_NOATIME | O_NONBLOCK)
 
+/* file table element */
 struct vu_fnode_t {
 	pthread_rwlock_t lock;
-	struct vuht_entry_t *ht;
-	char *path;
-	struct vu_vnode_t *vnode;
-	mode_t mode;
-	int flags;
-	int count;
+	struct vuht_entry_t *ht;  // ht entry of the module (NULL if the file is not virtualized)
+	char *path;               // absolute, canonicalized path of the file
+	struct vu_vnode_t *vnode; // pointeer to the vnode
+	mode_t mode;              // mode (including file type)
+	int flags;                // flags
+	int count;                // number of fd table entries sharing this element
 	/* module/service fields */
-	int sfd;
-	void *private;
+	int sfd;                  // file descritor as known by the module
+	void *private;            // Private data for modules
 };
 
 static int null_close_upcall(struct vuht_entry_t *ht, int sfd, void *private);
@@ -85,7 +86,7 @@ static int null_close_upcall(struct vuht_entry_t *ht, int sfd, void *private) {
 }
 
 int vu_fnode_close(struct vu_fnode_t *fnode) {
-	int ret_value; 
+	int ret_value;
 	pthread_rwlock_wrlock(&fnode->lock);
 	printkdebug(f, "close %s (%p) count %d", fnode->path, fnode->ht, fnode->count);
 	fnode->count -= 1;

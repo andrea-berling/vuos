@@ -229,7 +229,7 @@ void wi_accept4(struct vuht_entry_t *ht, struct syscall_descriptor_t *sd) {
 				if (vu_slowcall_test(sc) <= 0) {
 					sd->action = BLOCKIT;
 					return;
-				} else 
+				} else
 					vu_slowcall_out(sc, ht, fd, EPOLLIN, nested);
 			}
 		}
@@ -374,7 +374,6 @@ void wi_getpeername(struct vuht_entry_t *ht, struct syscall_descriptor_t *sd) {
 void wo_sendto(struct vuht_entry_t *ht, struct syscall_descriptor_t *sd);
 void wi_sendto(struct vuht_entry_t *ht, struct syscall_descriptor_t *sd) {
 	int nested = sd->extra->nested;
-	sd->inout = NULL;
 	if (ht) {
 		if (!nested) {
 			int fd = sd->syscall_args[0];
@@ -385,7 +384,6 @@ void wi_sendto(struct vuht_entry_t *ht, struct syscall_descriptor_t *sd) {
 				return;
 			}
 		}
-		sd->inout = NULL;
 		wo_sendto(ht, sd);
 	}
 }
@@ -453,7 +451,7 @@ void _wo_sendmsg(struct vuht_entry_t *ht, struct syscall_descriptor_t *sd) {
 	controladdr = (uintptr_t) msg->msg_control;
 	vu_alloc_peek_arg(controladdr, control, msg->msg_controllen, nested);
 	sd->action = SKIPIT;
-	ret_value = service_syscall(ht, __VU_sendto)(sfd, buf, bufsize, flags, 
+	ret_value = service_syscall(ht, __VU_sendto)(sfd, buf, bufsize, flags,
 			dest_addr, msg->msg_namelen, control, msg->msg_controllen, private);
 	if (ret_value < 0)
 		sd->ret_value = -errno;
@@ -500,7 +498,6 @@ void wo_sendto(struct vuht_entry_t *ht, struct syscall_descriptor_t *sd) {
 void wo_recvfrom(struct vuht_entry_t *ht, struct syscall_descriptor_t *sd);
 void wi_recvfrom(struct vuht_entry_t *ht, struct syscall_descriptor_t *sd) {
 	int nested = sd->extra->nested;
-	sd->inout = NULL;
 	if (ht) {
 		if (!nested) {
 			int fd = sd->syscall_args[0];
@@ -511,7 +508,6 @@ void wi_recvfrom(struct vuht_entry_t *ht, struct syscall_descriptor_t *sd) {
 				return;
 			}
 		}
-		sd->inout = NULL;
 		wo_recvfrom(ht, sd);
 	}
 }

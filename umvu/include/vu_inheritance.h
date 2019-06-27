@@ -5,6 +5,11 @@
 	 hypervisor modules can register a callback upcall that will be called
 	 in case of the evelt listed in inheritance_state_t */
 
+/* Warning: vu_inheritance_upcall_register is *NOT* thread safe. It has been designed
+	 for __attribute__((constructor)) functions (so the call happens before
+	 going multi-threading. A thread safe implementation for modules as
+   an upper layer by vu_mod_inheritance.c */
+
 /* CLONE/START is the pair of events to manage a new process/thread:
 	 CLONE is an event of the parent process/creating thread
 	 START is the first event if the newborn process/thread.
@@ -28,10 +33,10 @@ typedef void *(*inheritance_upcall_t)(inheritance_state_t state, void *arg);
 /* register an upcall handler */
 void vu_inheritance_upcall_register(inheritance_upcall_t upcall);
 
-/* 
+/*
 	 call all the registered handlers.
 
-	 vu_inheritance_call(INH_SOMETHING, NULL, commonarg): 
+	 vu_inheritance_call(INH_SOMETHING, NULL, commonarg):
 	 >>> all the handlers get commonarg as their arg
 	 >>> the return values of the handlers are discarded
 	 vu_inheritance_call(INH_SOMETHING, inoutarg, commonarg):
