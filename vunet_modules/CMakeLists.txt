@@ -14,5 +14,9 @@ foreach(VUNET_MOD ${VUNET_MODULES})
 endforeach(VUNET_MOD)
 
 target_link_libraries(vunetvdestack vdeplug)
-add_subdirectory(lwipv6)
-target_link_libraries(vunetlwipv6 lwipv6 vpoll fduserdata)
+add_subdirectory(lwip/contrib/ports/unix/lib)
+target_link_libraries(vunetlwip vpoll fduserdata nlq dl)
+target_include_directories(vunetlwip PRIVATE lwip/src/include
+                                             lwip/contrib/ports/unix/lib
+                                             lwip/contrib/ports/unix/port/include
+                                             )

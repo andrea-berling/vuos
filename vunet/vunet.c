@@ -182,6 +182,8 @@ int vu_vunet_lchown(const char *pathname, uid_t owner, gid_t group, int fd, void
 
 int vu_vunet_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event, void *fdprivate) {
 	current_vnetfd = fdprivate;
+    printkdebug(N, "epoll_ctl epfd: %d op: %d fd: %d events: %x vunet: %p", epfd, op, fd, event->events,
+            current_vnetfd);
 	if (current_vnetfd->vunet->netops->epoll_ctl == NULL)
     return errno = ENOSYS, -1;
   else
