@@ -1,0 +1,984 @@
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <unistd.h>
+#include <assert.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <linux/net.h>
+#include <linux/net.h>
+#include <linux/sockios.h>
+#include <linux/if.h>
+#include <dlfcn.h>
+#include <lwip/netif.h>
+#include <lwip/ip_addr.h>
+#include <lwip/netifapi.h>
+#include <lwip/tcpip.h>
+#include <lwip/err.h>
+#include <lwip/ip4_addr.h>
+#include <lwip/pbuf.h>
+#include <vunet.h>
+#include <fduserdata.h>
+#include <vpoll.h>
+#include <libnlq.h>
+#include <linux/netlink.h>
+
+#define LIB_LWIP "liblwip.so"
+// In this macro x is purposedly written without parentheses around it to permit a return statement
+// with nothing as an argument (e.g. in void functions). Use carefully
+#define DL_ERROR(x) do {\
+    fprintf(stderr,"vunetlwip.c, line:%d, %s\n",__LINE__,dlerror());\
+    return x;\
+    } while(0)
+
+#define RETRIEVE_FUN(x) struct stack_data *sd = vunet_get_private_data();\
+    x = dlsym(sd->handle,"lwip_"#x);\
+    if (x == NULL) DL_ERROR(-1);
+#define EFD_TBL_SIZE 64
+
+FDUSERDATA *sockets_data;
+
+struct stack_data {
+    void *handle;               // Handle to lwip.so symbols
+    struct netif *netif;        // Network interface
+};
+
+struct fd_data {
+    struct epoll_event ev;
+    int fd;
+    unsigned char is_netlink;
+    struct nlq_msg *msgq;
+};
+
+static int vunetlwip_socket(int domain, int type, int protocol){
+    int fd;
+    int is_netlink = 0;
+    int (*socket)(int,int,int);
+    RETRIEVE_FUN(socket)
+    if (domain != AF_NETLINK)
+        fd = socket(domain,type,protocol);
+    else
+    {
+        // Opening an unused "fake" socket, to get a valid fd that does not clash with the others
+        fd = socket(AF_INET,SOCK_DGRAM,0);
+        is_netlink = 1;
+    }
+    if (fd > -1)
+    {
+        struct fd_data *fdd = fduserdata_new(sockets_data,fd,struct fd_data);
+        if (!fdd) {errno = ENOMEM; return -1;}
+        // XXX Should I use some particular flag?
+        fdd->fd = vpoll_create(0,0);
+        fdd->is_netlink = is_netlink;
+        fdd->msgq = NULL;
+        vpoll_ctl(fdd->fd,VPOLL_CTL_ADDEVENTS,EPOLLOUT); /* The socket is ready for packet sending */
+        fduserdata_put(fdd);
+        return fd;
+    }
+    else
+        return -1;
+}
+
+static int vunetlwip_bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
+    struct fd_data *fdd = fduserdata_get(sockets_data,sockfd);
+    if (fdd == NULL || fdd->is_netlink == 0)
+    {
+        if (fdd) fduserdata_put(fdd);
+        int (*bind)(int,const struct sockaddr *,socklen_t);
+        RETRIEVE_FUN(bind)
+        return bind(sockfd,addr,addrlen);
+    }
+    else
+    {
+        fduserdata_put(fdd);
+        return 0;
+    }
+}
+#if 0 // vunetlwip template
+static int vunetlwip_fname(<++>) {
+    int (*fname)(<++>);
+    RETRIEVE_FUN(fname);
+    return fname(<++>);
+}
+#endif
+
+static int vunetlwip_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
+    int (*connect)(int,const struct sockaddr *,socklen_t);
+    RETRIEVE_FUN(connect)
+    return connect(sockfd,addr,addrlen);
+}
+
+static int vunetlwip_listen(int sockfd, int backlog) {
+    int (*listen)(int,int);
+    RETRIEVE_FUN(listen)
+    return listen(sockfd,backlog);
+}
+
+static int vunetlwip_accept4(int sockfd, struct sockaddr *addr, socklen_t *addrlen, int flags) {
+    // FIXME The flags are currently ignored
+    int (*accept)(int,struct sockaddr *,socklen_t *);
+    RETRIEVE_FUN(accept)
+    return accept(sockfd,addr,addrlen);
+}
+
+static int vunetlwip_getsockname(int sockfd, struct sockaddr *addr, socklen_t *addrlen) {
+    struct fd_data *fdd = fduserdata_get(sockets_data,sockfd);
+    if (fdd == NULL || fdd->is_netlink == 0)
+    {
+        if (fdd) fduserdata_put(fdd);
+        int (*getsockname)(int,struct sockaddr *,socklen_t *);
+        RETRIEVE_FUN(getsockname)
+        return getsockname(sockfd,addr,addrlen);
+    }
+    else
+    {
+        fduserdata_put(fdd);
+        struct sockaddr_nl *raddr = (struct sockaddr_nl *) addr;
+        raddr->nl_family = AF_NETLINK;
+        raddr->nl_pad = 0;
+        raddr->nl_pid = 0;
+        raddr->nl_groups = 0;
+        *addrlen = sizeof(struct sockaddr_nl);
+        return 0;
+    }
+}
+
+static int vunetlwip_getpeername(int sockfd, struct sockaddr *addr, socklen_t *addrlen) {
+    int (*getpeername)(int,struct sockaddr *,socklen_t *);
+    RETRIEVE_FUN(getpeername)
+    return getpeername(sockfd,addr,addrlen);
+}
+
+static ssize_t vunetlwip_recvfrom(void *buf, size_t len, int flags, struct sockaddr *from, socklen_t
+        *fromlen, struct fd_data *fdd)
+{
+    ssize_t retval = 0;
+    ssize_t copylen = 0;
+    struct nlq_msg *headmsg = nlq_head(fdd->msgq);
+    if (headmsg == NULL) {
+        return -ENODATA;
+    }
+    if (len < headmsg->nlq_size) {
+        if (flags & MSG_TRUNC)
+            retval = headmsg->nlq_size;
+        else
+            retval = len;
+        copylen = len;
+    } else
+        retval = copylen = headmsg->nlq_size;
+    if (buf != NULL && copylen > 0)
+        memcpy(buf, headmsg->nlq_packet, copylen);
+    if (!(flags & MSG_PEEK)) {
+        nlq_dequeue(&fdd->msgq);
+        nlq_freemsg(headmsg);
+        if (nlq_length(fdd->msgq) == 0)
+            vpoll_ctl(fdd->fd,VPOLL_CTL_DELEVENTS,EPOLLIN);
+    }
+    if (fromlen && *fromlen >= sizeof(struct sockaddr_nl)) {
+        struct sockaddr_nl *socknl = (struct sockaddr_nl *)from;
+        socknl->nl_family = AF_NETLINK;
+        socknl->nl_pad = 0;
+        socknl->nl_pid = 0;
+        socknl->nl_groups = 0;
+        *fromlen = sizeof(struct sockaddr_nl);
+    }
+    fduserdata_put(fdd);
+    return retval;
+}
+
+static ssize_t vunetlwip_recvmsg(int sockfd, struct msghdr *msg, int flags) {
+    struct fd_data *fdd = fduserdata_get(sockets_data,sockfd);
+    if (fdd == NULL || fdd->is_netlink == 0)
+    {
+        if (fdd) fduserdata_put(fdd);
+        ssize_t (*recvmsg)(int,struct msghdr *,int);
+        RETRIEVE_FUN(recvmsg)
+        return recvmsg(sockfd,msg,flags);
+    }
+    else
+    {
+        msg->msg_controllen=0;
+        if (msg->msg_iovlen == 1) {
+            ssize_t ret = vunetlwip_recvfrom(msg->msg_iov->iov_base, msg->msg_iov->iov_len, flags,
+                    msg->msg_name, &(msg->msg_namelen), fdd);
+            if (ret > msg->msg_iov->iov_len)
+                msg->msg_flags |= MSG_TRUNC;
+            return ret;
+
+        } else {
+            struct iovec *msg_iov;
+            size_t msg_iovlen;
+            unsigned int i,totalsize;
+            size_t size;
+            char *lbuf;
+            msg_iov=msg->msg_iov;
+            msg_iovlen=msg->msg_iovlen;
+            for (i=0,totalsize=0;i<msg_iovlen;i++)
+                totalsize += msg_iov[i].iov_len;
+            lbuf=alloca(totalsize);
+            size= vunetlwip_recvfrom(lbuf,totalsize,flags, msg->msg_name, &(msg->msg_namelen), fdd);
+            if (size > totalsize)
+                msg->msg_flags |= MSG_TRUNC;
+            for (i=0;size > 0 && i<msg_iovlen;i++) {
+                int qty=(size > msg_iov[i].iov_len)?msg_iov[i].iov_len:size;
+                memcpy(msg_iov[i].iov_base,lbuf,qty);
+                lbuf+=qty;
+                size-=qty;
+            }
+            return size;
+        }
+    }
+}
+
+void *netif_netlink_searchlink(struct nlmsghdr *msg, struct nlattr **attr, void *handle) {
+	struct ifinfomsg *ifi=(struct ifinfomsg *)(msg+1);
+    struct netif * (*netif_find)(const char *) = dlsym(handle,"netif_find");
+    struct netif * (*netif_get_by_index)(u8_t) = dlsym(handle,"netif_get_by_index");
+    if (!netif_find || !netif_get_by_index) DL_ERROR(NULL);
+    void (*lock)(void) = dlsym(handle,"sys_lock_tcpip_core");
+    void (*unlock)(void) = dlsym(handle,"sys_unlock_tcpip_core");
+    void *ret = NULL;
+    if (!lock || !unlock) DL_ERROR(NULL);
+    // To call raw api functions (netif_find and netif_get_by_index) there is the need to acquire
+    // the TCPIP core lock
+    lock();
+    ret = netif_get_by_index(ifi->ifi_index);
+    if (!ret && attr[IFLA_IFNAME] != NULL)
+        ret = netif_find((char*)(attr[IFLA_IFNAME] + 1));
+    unlock();
+    return ret;
+}
+
+#define netif_get_index(netif)      ((u8_t)((netif)->num + 1))
+
+static void nl_dump1link(struct nlq_msg *msg, struct netif *nip) {
+    uint32_t zero = 0;
+    nlq_addstruct(msg, ifinfomsg, .ifi_family=AF_INET6, .ifi_index=netif_get_index(nip), .ifi_type= nip->link_type,
+            .ifi_flags=nip->flags, .ifi_change=0xffffffff); 
+    nlq_addattr(msg, IFLA_ADDRESS, nip->hwaddr, nip->hwaddr_len);
+    char name[4];
+    name[0] = nip->name[0];
+    name[1] = nip->name[1];
+    name[2] = nip->num % 10 + '0';
+    name[3]=0;
+    nlq_addattr(msg, IFLA_IFNAME, name, sizeof(name));
+    // TODO Could probably abstract all this in a macro, or look for a macro in the lwipv6 code
+    char brd_addr[] = "\377\377\377\377\377\377";
+    nlq_addattr(msg, IFLA_BROADCAST, brd_addr, 6);
+    nlq_addattr(msg, IFLA_MTU, &(nip->mtu), sizeof(nip->mtu));
+}
+
+int netif_netlink_getlink(void *entry, struct nlmsghdr *msg, struct nlattr **attr, struct nlq_msg
+        **reply_msgq, void *handle)
+{
+	if (entry == NULL) { // DUMP
+        struct netif *nip;
+        struct netif *netif_list = dlsym(handle,"netif_list");
+		for (nip = netif_list; nip != NULL ; nip = nip->next) {
+			struct nlq_msg *newmsg = nlq_createmsg(RTM_NEWLINK, NLM_F_MULTI, msg->nlmsg_seq, 0);
+			nl_dump1link(newmsg, nip);
+			nlq_complete_enqueue(newmsg, reply_msgq);
+		}
+		return 0;
+	} else {
+		struct nlq_msg *newmsg = nlq_createmsg(RTM_NEWLINK, 0, msg->nlmsg_seq, 0);
+		nl_dump1link(newmsg, entry);
+		nlq_complete_enqueue(newmsg, reply_msgq);
+		return 1;
+	}
+}
+
+int netif_netlink_setlink(void *entry, struct nlmsghdr *msg, struct nlattr **attr, void *handle){
+    // XXX Right now it only supports set up and down as a link modification
+	struct ifinfomsg *ifi=(struct ifinfomsg *)(msg+1);
+    struct netif *nip = (struct netif *) entry;
+    void (*lock)(void) = dlsym(handle,"sys_lock_tcpip_core");
+    void (*unlock)(void) = dlsym(handle,"sys_unlock_tcpip_core");
+    void (*netif_setupdown)(struct netif *) = dlsym(handle,ifi->ifi_flags & IFF_UP ? "netif_set_up"
+            : "netif_set_down");
+    if (!netif_setupdown || !lock || !unlock) DL_ERROR(-1);
+    lock();
+    netif_setupdown(nip);
+    unlock();
+    return 0;
+}
+
+// XXX NETLINK_ADDR support, work in progress
+//#if 0
+
+int prefixlen_from_ip4(uint32_t mask)
+{
+    int length = 0;
+    int i;
+    for (i=0; i < 32; i++)
+        if (mask & (1 << (31-i)))
+            length++;
+        else
+            break;
+    return length;
+}
+
+struct ip_addr_info {
+    int is_ipv4;
+    struct netif *nip;
+};
+
+void *netif_netlink_searchaddr(struct nlmsghdr *msg, struct nlattr **attr, void *handle) {
+	struct ifaddrmsg *ifa=(struct ifaddrmsg *)(msg+1);
+    void (*lock)(void) = dlsym(handle,"sys_lock_tcpip_core");
+    void (*unlock)(void) = dlsym(handle,"sys_unlock_tcpip_core");
+    struct netif * (*netif_get_by_index)(u8_t) = dlsym(handle,"netif_get_by_index");
+    if (!lock || !unlock || !netif_get_by_index) DL_ERROR(NULL);
+    lock();
+	struct netif *nip = netif_get_by_index(ifa->ifa_index);
+    if (nip)
+    {
+        if (ifa->ifa_family == AF_INET)
+        {
+            if (ifa->ifa_prefixlen == prefixlen_from_ip4((netif_ip4_addr(nip))->addr) &&
+                    attr[IFA_ADDRESS] != NULL &&
+                    memcmp(netif_ip_addr4(nip), attr[IFA_ADDRESS]+1, sizeof(uint32_t)) == 0
+                    )
+            {
+                struct ip_addr_info *ipi = (struct ip_addr_info *) malloc(sizeof(struct ip_addr_info));
+                if (!ipi)
+                {
+                    unlock();
+                    errno=ENOMEM;
+                    return NULL;
+                }
+                else
+                {
+                    ipi->is_ipv4 = 1;
+                    ipi->nip = nip;
+                    unlock();
+                    return ipi;
+                }
+            }
+            else
+            {
+                unlock();
+                return NULL;
+            }
+        }
+        else if (ifa->ifa_family == AF_INET6)
+        {
+            unlock();
+            return NULL;
+            // TODO ip6 support
+#if 0
+            if (ifa->ifa_prefixlen == prefixlen_from_ip6(nip->ip_addr.addr) &&
+                    attr[IFA_ADDRESS] != NULL &&
+                    memcmp(&(nip->ip_addr.addr), attr[IFA_ADDRESS]+1, sizeof(unsigned int)) == 0
+                    )
+            {
+                unlock();
+                return nip;
+            }
+            else
+            {
+                unlock();
+                return NULL;
+            }
+#endif
+        }
+        else
+        {
+            unlock();
+            return NULL;
+        }
+    }
+    else
+    {
+        unlock();
+        return NULL;
+    }
+}
+
+static void nl_dump1addr(struct nlq_msg *msg, void *handle, ip_addr_t *ip, int isv4, int index) {
+    unsigned char scope = 0;
+
+    // TODO scope resolution, ip6 support, flags support (probably absent from lwip)
+    /*
+    if ((ntohl(ipl->ipaddr.addr[0]) & 0xff000000) == 0xfe000000) {
+        if ((ntohl(ipl->ipaddr.addr[0]) & 0xC00000) == 0x800000)
+            scope=RT_SCOPE_LINK;
+        else if ((ntohl(ipl->ipaddr.addr[0]) & 0xC00000)== 0x08000000)
+            scope=RT_SCOPE_SITE;
+    } else if ((ntohl(ipl->ipaddr.addr[0]) & 0xff000000) == 0) {
+        if (ip_addr_is_v4comp(&(ipl->ipaddr))) {
+            if (ntohl(ipl->ipaddr.addr[3]) >> 24 == 0x7f)
+                scope=RT_SCOPE_HOST;
+        } else
+            scope=RT_SCOPE_HOST;
+    }
+    */
+
+	nlq_addstruct(msg, ifaddrmsg,
+			.ifa_family=AF_INET,
+			.ifa_prefixlen=prefixlen_from_ip4(ip->addr),
+            .ifa_index=index,
+            .ifa_flags=0,
+			.ifa_scope=scope
+			);
+    //void *addr;
+    uint32_t addr;
+    size_t addr_size;
+	//int isv4=ip_addr_is_v4comp(&(ipl->ipaddr));
+	if (isv4)
+    {
+		addr = ip->addr;
+        addr_size = sizeof(uint32_t);
+    }
+	else
+    {
+        // TODO ip6 support
+#if 0
+		addr = &(ipl->ipaddr);
+        addr_size = sizeof(ipl->ipaddr);
+#endif
+    }
+	nlq_addattr(msg, IFA_ADDRESS, &addr, addr_size);
+}
+
+int netif_netlink_getaddr(void *entry, struct nlmsghdr *msg, struct nlattr **attr, struct nlq_msg
+        **reply_msgq, void *handle){
+	struct ifaddrmsg *ifa=(struct ifaddrmsg *)(msg+1);
+    struct ip_addr_info *ipi = (struct ip_addr_info *) entry;
+    void (*lock)(void) = dlsym(handle,"sys_lock_tcpip_core");
+    void (*unlock)(void) = dlsym(handle,"sys_unlock_tcpip_core");
+    struct netif * (*netif_get_by_index)(u8_t) = dlsym(handle,"netif_get_by_index");
+    if (!lock || !unlock || !netif_get_by_index) DL_ERROR(-1);
+    lock();
+    if (entry == NULL){
+        struct netif *netif_list = dlsym(handle,"netif_list");
+        if (!netif_list) DL_ERROR(-1);
+        struct netif *nip = netif_get_by_index(ifa->ifa_index);
+		for (nip = netif_list; nip != NULL ; nip = nip->next)
+        {
+            struct nlq_msg *newmsg = nlq_createmsg(RTM_NEWADDR, NLM_F_MULTI, msg->nlmsg_seq, 0);
+            nl_dump1addr(newmsg, handle, netif_ip_addr4(nip),1,netif_get_index(nip));
+            nlq_complete_enqueue(newmsg, reply_msgq);
+            // XXX ip6 support
+#if 0 
+            int i;
+            for (i = 0; i < LWIP_IPV6_NUM_ADDRESSES; i++)
+            {
+                struct nlq_msg *newmsg = nlq_createmsg(RTM_NEWADDR, NLM_F_MULTI, msg->nlmsg_seq, 0);
+                nl_dump1addr(newmsg, handle, netif_ip_addr6(nip),0);
+                nlq_complete_enqueue(newmsg, reply_msgq);
+            }
+#endif
+        }
+        unlock();
+        return 0;
+    }
+    else{
+        struct netif *nip = ipi->nip;
+        struct nlq_msg *newmsg = nlq_createmsg(RTM_NEWADDR, 0, msg->nlmsg_seq, 0);
+        nl_dump1addr(newmsg, handle, netif_ip4_addr(nip), ipi->is_ipv4,netif_get_index(nip));
+        nlq_complete_enqueue(newmsg, reply_msgq);
+        free(ipi);
+        unlock();
+        return 1;
+    }
+}
+
+#if 0
+int ip_addr_and_netmask_from_netlink_msg(struct stack *stack, struct ifaddrmsg *ifa, struct nlattr
+        **attr, struct ip_addr *ipaddr, struct ip_addr *netmask){
+
+    if (ipaddr)
+        memcpy(ipaddr,IP_ADDR_ANY,sizeof(struct ip_addr));
+    if (netmask)
+        prefix2mask((int)(ifa->ifa_prefixlen)+(ifa->ifa_family == PF_INET?(32*3):0),netmask);
+    if (ipaddr && (attr[IFA_ADDRESS] != NULL || attr[IFA_LOCAL] != NULL )) {
+        unsigned short a = (attr[IFA_ADDRESS] != NULL) ? IFA_ADDRESS : IFA_LOCAL;
+        if (ifa->ifa_family == PF_INET && attr[a]->nla_len == 8) {
+            ipaddr->addr[2]=IP64_PREFIX;
+            ipaddr->addr[3]=(*((int *)(attr[a]+1)));
+            return 0;
+        }
+        else if (ifa->ifa_family == PF_INET6 && attr[a]->nla_len == 20) {
+            register int i;
+            for (i=0;i<4;i++)
+                ipaddr->addr[i]=(*(((int *)(attr[a]+1))+i));
+            return 0;
+        }
+        else {
+            return -EINVAL;
+        }
+    }
+    else
+        return -EINVAL;
+}
+
+int netif_netlink_addaddr(struct nlmsghdr *msg, struct nlattr **attr, void *stackinfo){
+	struct ifaddrmsg *ifa=(struct ifaddrmsg *)(msg+1);
+	struct netif *nip;
+	struct ip_addr ipaddr,netmask;
+    struct stack *stack = (struct stack *) stackinfo;
+
+
+	/*printf("netif_netlink_adddeladdr %d\n",ifa->ifa_prefixlen);*/
+	nip=netif_find_id(stack, ifa->ifa_index);
+	if (nip == NULL) {
+		fprintf(stderr,"Netlink add/deladdr id error\n");
+		return -ENODEV;
+	}
+
+    int n;
+    n = ip_addr_and_netmask_from_netlink_msg(stack,ifa,attr,&ipaddr,&netmask);
+    if (n < 0)
+        return n;
+
+    return netif_add_addr(nip,&ipaddr,&netmask);
+}
+
+int netif_netlink_deladdr(void *entry, struct nlmsghdr *msg, struct nlattr **attr, void *stackinfo){
+	struct ifaddrmsg *ifa=(struct ifaddrmsg *)(msg+1);
+	struct netif *nip;
+    struct stack *stack = (struct stack *) stackinfo;
+    struct ip_addr_list *ipl = (struct ip_addr_list *) entry;
+
+
+	/*printf("netif_netlink_adddeladdr %d\n",ifa->ifa_prefixlen);*/
+	nip=netif_find_id(stack, ifa->ifa_index);
+	if (nip == NULL) {
+		fprintf(stderr,"Netlink add/deladdr id error\n");
+		return -ENODEV;
+	}
+
+    return netif_del_addr(nip,&(ipl->ipaddr),NULL);
+}
+#endif
+//#endif
+
+nlq_request_handlers_table handlers_table = {
+    [RTMF_LINK]={netif_netlink_searchlink, netif_netlink_getlink, NULL/*netif_netlink_addlink*/,
+        NULL /*netif_netlink_dellink*/,  netif_netlink_setlink},
+    [RTMF_ADDR]={netif_netlink_searchaddr, netif_netlink_getaddr, NULL/*netif_netlink_addaddr*/,
+        NULL/*netif_netlink_deladdr*/, NULL}
+    /*
+    [RTMF_ROUTE]={ip_route_netlink_searchroute, ip_route_netlink_getroute,
+        ip_route_netlink_addroute, ip_route_netlink_delroute, NULL}
+    */
+};
+
+static ssize_t vunetlwip_sendto(const void *buf, size_t len, struct fd_data *fdd)
+{
+    struct nlmsghdr *msg = (struct nlmsghdr *)buf;
+    struct stack_data *sd = vunet_get_private_data();
+
+    while (NLMSG_OK(msg, len)) {
+        struct nlq_msg *msgq;
+        msgq = nlq_process_rtrequest(msg, handlers_table, sd->handle);
+        while (msgq != NULL) {
+            struct nlq_msg *msg = nlq_dequeue(&msgq);
+            //msg->nlq_packet->nlmsg_pid = nl->pid;
+            nlq_enqueue(msg, &fdd->msgq);
+        }
+        msg = NLMSG_NEXT(msg, len);
+    }
+
+    if (nlq_length(fdd->msgq) > 0)
+        vpoll_ctl(fdd->fd,VPOLL_CTL_ADDEVENTS, EPOLLIN);
+    fduserdata_put(fdd);
+    return len;
+}
+
+static ssize_t vunetlwip_sendmsg(int sockfd, struct msghdr *msg, int flags) {
+    struct fd_data *fdd = fduserdata_get(sockets_data,sockfd);
+    if (fdd == NULL || fdd->is_netlink == 0)
+    {
+        if (fdd) fduserdata_put(fdd);
+        ssize_t (*sendmsg)(int,const struct msghdr *,int);
+        RETRIEVE_FUN(sendmsg)
+        return sendmsg(sockfd,msg,flags);
+    }
+    else
+    {
+        msg->msg_controllen=0;
+        if (msg->msg_iovlen == 1) {
+            return vunetlwip_sendto(msg->msg_iov->iov_base,msg->msg_iov->iov_len,fdd);
+        } else {
+            struct iovec *msg_iov;
+            size_t msg_iovlen;
+            unsigned int i,totalsize;
+            size_t size;
+            char *lbuf;
+            msg_iov=msg->msg_iov;
+            msg_iovlen=msg->msg_iovlen;
+            for (i=0,totalsize=0;i<msg_iovlen;i++)
+                totalsize += msg_iov[i].iov_len;
+            for (i=0;size > 0 && i<msg_iovlen;i++) {
+                int qty=msg_iov[i].iov_len;
+                memcpy(lbuf,msg_iov[i].iov_base,qty);
+                lbuf+=qty;
+                size-=qty;
+            }
+            size=vunetlwip_sendto(lbuf, totalsize, fdd);
+            return size;
+        }
+    }
+}
+
+static int vunetlwip_setsockopt(int sockfd, int level, int optname, const void *optval, socklen_t optlen) {
+    // XXX There is a hook that can be defined to support options not provided by lwip. May be
+    // useful
+    int (*setsockopt)(int, int,int,const void *,socklen_t);
+    RETRIEVE_FUN(setsockopt)
+    return setsockopt(sockfd,level,optname,optval,optlen);
+}
+
+static int vunetlwip_getsockopt(int sockfd, int level, int optname, void *optval, socklen_t optlen) {
+    // XXX There is a hook that can be defined to support options not provided by lwip. May be
+    // useful
+    int (*getsockopt)(int, int,int,void *,socklen_t);
+    RETRIEVE_FUN(getsockopt)
+    return getsockopt(sockfd,level,optname,optval,optlen);
+}
+
+static int vunetlwip_shutdown(int sockfd, int how) {
+    int (*shutdown)(int,int);
+    RETRIEVE_FUN(shutdown)
+    return shutdown(sockfd,how);
+}
+
+static int vunetlwip_ioctl(int s, unsigned long cmd, void *argp) {
+    int (*ioctl)(int, long, void *);
+    RETRIEVE_FUN(ioctl)
+    return ioctl(s,cmd,argp);
+}
+
+int (*lwip_close)(int);
+
+static int vunetlwip_close(int fd) {
+    struct fd_data *fdd = fduserdata_get(sockets_data,fd);
+    if (fdd) fduserdata_del(fdd);
+    return lwip_close(fd);
+}
+
+static int vunetlwip_fcntl(int s, int cmd, int val) {
+    int (*fcntl)(int,int,int);
+    RETRIEVE_FUN(fcntl)
+    return fcntl(s,cmd,val);
+}
+
+static int vunetlwip_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event) {
+    // TODO
+    /* Roadmap:
+     *  - add the hooks in lwip that notifies about events on the socket
+     *  - define the fduserdata table that maps lwip socket fds to vpoll eventfds and respective
+     *  epoll_data
+     *  - implement the epoll_ctl, this way:
+     *    - use the given epfd and add/del/mod the efd corresponding to the given fd
+     *    - save the event and data in the fduserdata table
+     *  - What does the user defined hook do? It looks up the socket fd in the table, checks the
+     *  signaled event and the saved events for that fd. Based on that, it calls vpoll to signal of
+     *  the efd the right event to the vuos core
+    */
+    struct fd_data *fdd;
+    if ((fdd = fduserdata_get(sockets_data,fd)) == NULL)
+        return -1;
+    else
+    {
+        fdd->ev.events = event->events;
+        //fd->ev->data = event->data;
+        epoll_ctl(epfd,op,fdd->fd,event);
+        fduserdata_put(fdd);
+        return 0;
+    }
+}
+
+static int vunetlwip_supported_domain(int domain)
+{
+	switch(domain) {
+		case AF_INET:
+		case PF_INET6:
+		case PF_NETLINK:
+		//case PF_PACKET:
+			return 1;
+		default:
+			return 0;
+	}
+}
+
+static int vunetlwip_supported_ioctl(unsigned long request)
+{
+    // TODO
+    return 0;
+}
+
+#if 0
+static char *intname[]={"vd","tn","tp"};
+#define INTTYPES (sizeof(intname)/sizeof(char *))
+static char *paramname[]={"ra"};
+#define PARAMTYPES (sizeof(paramname)/sizeof(char *))
+
+struct ifname {
+	unsigned char type;
+	unsigned char num;
+	char *name;
+	struct ifname *next;
+};
+
+static void iffree(struct ifname *head)
+{
+	if (head==NULL)
+		return;
+	else {
+		iffree(head->next);
+		free(head->name);
+		free(head);
+	}
+}
+
+static char *ifname(struct ifname *head,unsigned char type,unsigned char num)
+{
+	if (head==NULL)
+		return NULL;
+	else if (head->type == type && head->num == num)
+		return head->name;
+	else return ifname(head->next,type,num);
+}
+
+static void ifaddname(struct ifname **head,char type,char num,char *name)
+{
+	struct ifname *thisif=malloc(sizeof (struct ifname));
+	if (thisif != NULL) {
+		thisif->type=type;
+		thisif->num=num;
+		thisif->name=strdup(name);
+		thisif->next=*head;
+		*head=thisif;
+	}
+}
+
+static void myputenv(struct ifname **head, int *intnum, char *paramval[], char *arg)
+{
+	int i;
+    /* For each interface type */
+	for (i=0;i<INTTYPES;i++) {
+        /* If a supported interface + a digit has been supplied */
+		if (strncmp(arg,intname[i],2)==0 && arg[2] >= '0' && arg[2] <= '9') {
+            /* If a named interface has been supplied */
+			if (arg[3] == '=') {
+                /* Add the given interface to head */
+				ifaddname(head, i,arg[2]-'0',arg+4);
+				if (arg[2]-'0'+1 > intnum[i]) intnum[i]=arg[2]-'0'+1;
+			}
+            /* Else just change the number of the supplied interface type, if needed */
+			else if (arg[3] == 0) {
+				if (arg[2]-'0' > intnum[i]) intnum[i]=arg[2]-'0';
+			}
+			break;
+		}
+	}
+
+    /* If a parameter has been supplied, set paramval[i] pointer to the value of the given parameter
+     * */
+	for (i=0;i<PARAMTYPES;i++) {
+		if (strncmp(arg,paramname[i],2)==0) {
+			if (arg[2] == '=') {
+				paramval[i]=arg+3;
+			}
+		}
+	}
+}
+
+static char stdargs[]="vd1";
+static void lwipargtoenv(struct stack *s,char *initargs)
+{
+	char *next;
+	char *unquoted;
+	char quoted=0;
+	char totint=0;
+	register int i,j;
+	struct ifname *ifh=NULL;
+	int intnum[INTTYPES];
+	char *paramval[PARAMTYPES];
+
+	memset(intnum,0,sizeof(intnum));
+	memset(paramval,0,sizeof(paramval));
+
+	if (initargs==0 || *initargs == 0) initargs=stdargs;
+	if (strcmp(initargs,"lo") != 0) {
+        /* Until we reach the end of the initargs string */
+		while (*initargs != 0) {
+            /* Position next and unquoted at the position pointed by initargs of the input string */
+			next=initargs;
+			unquoted=initargs;
+            /* Up until we reach a comma or a quoting sign, as long as we have not reached the end */
+            while ((*next != ',' || quoted) && *next != 0) {
+                /* Save the character pointed by next in the unquoted string at the position pointed
+                 * by unquoted */
+                *unquoted=*next;
+                /* If we reached the second quoting, turn off the quote flag */
+                if (*next == quoted)
+                    quoted=0;
+                /* If we reach the first quoting, turn on the quote flag, setting it to the quote
+                 * sign */
+                else if (*next == '\'' || *next == '\"')
+                    quoted=*next;
+                else
+                /* Proceed on the unquoted string*/
+                    unquoted++;
+                /* Proceed on the initargs string */
+                next++;
+            }
+			if (*next == ',') {
+				*unquoted=*next=0;
+				next++;
+			}
+            /* At this point , we have found a string between two commas, which may be quoted, and
+             * we have set the comma character with a NULL byte. We have also set next to the next
+             * character, to resume later on.  Standard C programs will see the initargs string as a
+             * shorter string than the input string, with only the first parameter */
+			if (*initargs != 0)
+				myputenv(&ifh,intnum,paramval,initargs);
+            /*
+             * If we have not finished the input string, we put the found parameter in the env with
+             * myputenv, and then we start all over again from next
+             * */
+			initargs=next;
+		}
+		/* load interfaces */
+        /* count the interfaces */
+		for (i=0;i<INTTYPES;i++)
+			totint+=intnum[i];
+        /* at least one */
+		if (totint==0)
+			intnum[0]=1;
+        /* For each type of interface, try to add it to the stack */
+		for (j=0;j<intnum[0];j++) {
+			if (lwip_vdeif_add(s,ifname(ifh,0,j)) == NULL) 
+				fprintf(stderr,"vunetlwip: vd[%d] configuration error\n",j);
+		}
+		for (j=0;j<intnum[1];j++) {
+			if (lwip_tunif_add(s,ifname(ifh,1,j)) == NULL)
+				fprintf(stderr,"vunetlwip: tn[%d] configuration error\n",j);
+		}
+		for (j=0;j<intnum[2];j++) {
+			if (lwip_tapif_add(s,ifname(ifh,2,j)) == NULL)
+				fprintf(stderr,"vunetlwip: tp[%d] configuration error\n",j);
+		}
+		iffree(ifh);
+
+		if (paramval[0] != NULL)
+			lwip_radv_load_configfile(s,paramval[0]);
+	}
+}
+#endif
+
+static void init_func(void *arg){
+    struct stack_data *sd = (struct stack_data *) arg;
+    // Stack initialization
+    err_t (*tapif_init)(struct netif *);
+    struct netif *(*netifadd)(struct netif *netif, const ip4_addr_t *ipaddr, const ip4_addr_t
+            *netmask, const ip4_addr_t *gw, void *state, netif_init_fn init, netif_input_fn input);
+    int8_t (*tcpipinput)(struct pbuf *p, struct netif *inp);
+    // XXX Right now only a tap interface is initialized
+    if ((tapif_init = dlsym(sd->handle,"tapif_init")) == NULL) DL_ERROR();
+    if ((netifadd = dlsym(sd->handle,"netif_add")) == NULL) DL_ERROR();
+    if ((tcpipinput = dlsym(sd->handle,"tcpip_input")) == NULL) DL_ERROR();
+    netifadd(sd->netif,NULL,NULL,NULL,NULL,tapif_init,tcpipinput);
+}
+
+static int vunetlwip_init (const char *source, unsigned long flags, const char *args, void **private_data) {
+    void *handle;
+    if ((handle = dlmopen(LM_ID_NEWLM,LIB_LWIP,RTLD_LAZY)) == NULL)
+        DL_ERROR(-1);
+    else
+    {
+        sockets_data = fduserdata_create(EFD_TBL_SIZE);
+        if (sockets_data == NULL) goto mem_error;
+        struct stack_data *sd = malloc(sizeof(struct stack_data));
+        if (!sd) goto mem_error;
+        *private_data = sd;
+        sd->handle = handle;
+        sd->netif = malloc(sizeof(struct netif));
+        if (!sd->netif)
+        {
+            free(sd);
+            goto mem_error;
+        }
+        void (*tcpipinit)(tcpip_init_done_fn initfunc, void *arg);
+        lwip_close = dlsym(handle,"lwip_close");
+        if ((tcpipinit = dlsym(sd->handle,"tcpip_init")) == NULL)
+            DL_ERROR(-1);
+        tcpipinit(init_func,sd);
+        return 0;
+mem_error:
+        dlclose(handle);
+        errno = ENOMEM;
+        return -1;
+    }
+    /*
+	struct stack *s=lwip_stack_new();
+	if (s) {
+		lwipargtoenv(s,args);
+		*private_data = s;
+		return 0;
+	} else {
+		errno=EFAULT;
+		return -1;
+	}
+    */
+}
+
+int update_socket_events(int fd, int pollin, int pollout, int pollerr, int *err)
+{
+    // XXX as of this moment, using the emulation layer of vpoll, pollerr events can't really be
+    // signaled
+    struct fd_data *fdd = fduserdata_get(sockets_data,fd);
+    if (fdd)
+    {
+        uint32_t events = 0;
+        if (pollin && (fdd->ev.events && EPOLLIN))
+            events |= EPOLLIN;
+        if (pollout && (fdd->ev.events && EPOLLOUT))
+            events |= EPOLLOUT;
+        if (pollerr && (fdd->ev.events && EPOLLERR))
+            events |= EPOLLERR;
+        vpoll_ctl(fdd->fd,VPOLL_CTL_SETEVENTS,events);
+        fduserdata_put(fdd);
+        return 0;
+    }
+    else
+    {*err = EINVAL; return -1;}
+}
+
+static int vunetlwip_fini (void *private_data){
+    struct stack_data *sd = private_data;
+    dlclose(sd->handle);
+    fduserdata_destroy(sockets_data);
+    free(sd->netif);
+    free(sd);
+	return 0;
+}
+
+struct vunet_operations vunet_ops={
+	.socket = vunetlwip_socket,
+	.bind = vunetlwip_bind,
+	.connect = vunetlwip_connect,
+	.listen = vunetlwip_listen,
+	.accept4 = vunetlwip_accept4, 
+	.getsockname = vunetlwip_getsockname,
+	.getpeername = vunetlwip_getpeername,
+	.recvmsg = vunetlwip_recvmsg,
+	.sendmsg = vunetlwip_sendmsg,
+	.setsockopt = vunetlwip_setsockopt,
+	.getsockopt = vunetlwip_getsockopt,
+	.shutdown = vunetlwip_shutdown,
+    .ioctl = vunetlwip_ioctl,
+	.close = vunetlwip_close,
+	.fcntl = vunetlwip_fcntl,
+    .epoll_ctl = vunetlwip_epoll_ctl,
+	.supported_domain = vunetlwip_supported_domain,
+	.supported_ioctl = vunetlwip_supported_domain,
+	.init = vunetlwip_init,
+	.fini = vunetlwip_fini
+};
