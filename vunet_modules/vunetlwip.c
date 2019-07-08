@@ -378,9 +378,6 @@ int netif_netlink_setlink(void *entry, struct nlmsghdr *msg, struct nlattr **att
     return 0;
 }
 
-// XXX NETLINK_ADDR support, work in progress
-//#if 0
-
 int prefixlen_from_mask(uint32_t mask)
 {
     int length = 0;
@@ -398,18 +395,21 @@ struct ip_addr_info {
     int addr_idx;       // Index in the netif IPv6 addresses array; i < 0 then the required address is IPv4
 };
 
-int compare_addresses(const ip_addr_t *addr1, void *addr2, int is_v4)
+int compare_addresses(const ip_addr_t *addr1, uint32_t *addr2, int is_v4)
 {
     if (is_v4)
-        return memcmp(&(ip_2_ip4(addr1)->addr), addr2, sizeof(uint32_t)) == 0;
+    {
+        uint32_t tmp = ntohl(ip_2_ip4(addr1)->addr);
+        return memcmp(&tmp, addr2, sizeof(uint32_t)) == 0;
+    }
     else
     {
         int i;
-        uint32_t *p = (uint32_t *)addr2;
         for(i = 0; i < 4; i++)
         {
             // XXX Should I check the zone?
-            if (memcmp(ip_2_ip6(addr1)->addr+i,p+i,sizeof(uint32_t)) != 0)
+            uint32_t tmp = ntohl(ip_2_ip6(addr1)->addr[i]);
+            if (memcmp(&tmp,addr2+i,sizeof(uint32_t)) != 0)
                 return 0;
         }
         return 1;
@@ -430,9 +430,9 @@ void *netif_netlink_searchaddr(struct nlmsghdr *msg, struct nlattr **attr, void 
         /* As per man 7 rtnetlink ifa_family can currently be either AF_INET or AF_INET6 */
         if (ifa->ifa_family == AF_INET)
         {
-            if (ifa->ifa_prefixlen == prefixlen_from_mask((netif_ip4_netmask(nip))->addr) &&
+            if (ifa->ifa_prefixlen == prefixlen_from_mask(ntohl((netif_ip4_netmask(nip))->addr)) &&
                     attr[IFA_ADDRESS] != NULL &&
-                    compare_addresses(netif_ip_addr4(nip),attr[IFA_ADDRESS]+1,1)
+                    compare_addresses(netif_ip_addr4(nip),(uint32_t*)(attr[IFA_ADDRESS]+1),1)
                     )
             {
                 struct ip_addr_info *ipi = (struct ip_addr_info *) malloc(sizeof(struct ip_addr_info));
@@ -460,8 +460,8 @@ void *netif_netlink_searchaddr(struct nlmsghdr *msg, struct nlattr **attr, void 
         {
             int i;
             for (i = 0; i < LWIP_IPV6_NUM_ADDRESSES; i++)
-                if (ip6_addr_isvalid(netif_ip6_addr_state(nip, i)) && attr[IFA_ADDRESS] != NULL
-                        && compare_addresses(netif_ip_addr6(nip,i),attr[IFA_ADDRESS]+1,0))
+                if (!ip6_addr_isinvalid(netif_ip6_addr_state(nip, i)) && attr[IFA_ADDRESS] != NULL
+                        && compare_addresses(netif_ip_addr6(nip,i),(uint32_t*)(attr[IFA_ADDRESS]+1),0))
                 {
                     struct ip_addr_info *ipi = (struct ip_addr_info *) malloc(sizeof(struct ip_addr_info));
                     if (!ipi)
@@ -500,7 +500,7 @@ static void nl_dump1addr(struct nlq_msg *msg, const ip_addr_t *ip, uint32_t netm
     unsigned char family = isv4 ? AF_INET : AF_INET6;
     // XXX I can't seem to find a place to set a prefix length for a IPv6 address in lwip, so
     // let's say 64
-    unsigned char prefixlen = isv4 ? prefixlen_from_mask(netmask) : 64;
+    unsigned char prefixlen = isv4 ? prefixlen_from_mask(ntohl(netmask)) : 64;
 
     // TODO scope resolution, flags support (probably absent from lwip)
     /*
@@ -527,9 +527,18 @@ static void nl_dump1addr(struct nlq_msg *msg, const ip_addr_t *ip, uint32_t netm
 			);
 
 	if (isv4)
-        nlq_addattr(msg, IFA_ADDRESS, &(ip_2_ip4(ip)->addr), sizeof(uint32_t));
+    {
+        uint32_t tmp = ntohl(ip_2_ip4(ip)->addr);
+        nlq_addattr(msg, IFA_ADDRESS, &tmp, sizeof(uint32_t));
+    }
 	else
-        nlq_addattr(msg, IFA_ADDRESS, (ip_2_ip6(ip))->addr, 4*sizeof(uint32_t));
+    {
+        uint32_t tmp[4];
+        int i;
+        for (i = 0; i < 4; i++)
+            tmp[i] = ntohl((ip_2_ip6(ip))->addr[i]);
+        nlq_addattr(msg, IFA_ADDRESS, &tmp, 4*sizeof(uint32_t));
+    }
 }
 
 int netif_netlink_getaddr(void *entry, struct nlmsghdr *msg, struct nlattr **attr, struct nlq_msg
@@ -553,7 +562,7 @@ int netif_netlink_getaddr(void *entry, struct nlmsghdr *msg, struct nlattr **att
             int i;
             for (i = 0; i < LWIP_IPV6_NUM_ADDRESSES; i++)
             {
-                if (ip6_addr_isvalid(netif_ip6_addr_state(nip,i)))
+                if (!ip6_addr_isinvalid(netif_ip6_addr_state(nip,i)))
                 {
                     struct nlq_msg *newmsg = nlq_createmsg(RTM_NEWADDR, NLM_F_MULTI, msg->nlmsg_seq, 0);
                     nl_dump1addr(newmsg, netif_ip_addr6(nip,i),0,0,idx);
@@ -587,6 +596,7 @@ void prefix2mask(int len, ip4_addr_t *netmask)
         for(i = 0; i < len; i++)
             netmask->addr |= (1 << (31-i));
     }
+    netmask->addr = htonl(netmask->addr);
 }
 
 int ip_addr_and_netmask_from_netlink_msg(struct ifaddrmsg *ifa, struct nlattr
@@ -600,7 +610,9 @@ int ip_addr_and_netmask_from_netlink_msg(struct ifaddrmsg *ifa, struct nlattr
             if (netmask)
                 prefix2mask((int)(ifa->ifa_prefixlen),ip_2_ip4(netmask));
             if (attr[a]->nla_len == 8) {
-                memcpy(&(ip_2_ip4(ipaddr)->addr),(int *)(attr[a]+1),sizeof(uint32_t));
+                uint32_t tmp;
+                memcpy(&tmp,(int *)(attr[a]+1),sizeof(uint32_t));
+                ip_2_ip4(ipaddr)->addr = htonl(tmp);
                 return 0;
             }
             else
@@ -609,7 +621,12 @@ int ip_addr_and_netmask_from_netlink_msg(struct ifaddrmsg *ifa, struct nlattr
         else
         {
             if (attr[a]->nla_len == 20) {
-                memcpy(ip_2_ip6(ipaddr)->addr,(int *)(attr[a]+1),4*sizeof(uint32_t));
+                uint32_t tmp[4];
+                int i;
+                uint32_t *addr = (uint32_t *)(attr[a]+1);
+                for(i = 0; i < 4; i++)
+                    tmp[i] = htonl(addr[i]);
+                memcpy(ip_2_ip6(ipaddr)->addr,&tmp,4*sizeof(uint32_t));
                 return 0;
             }
             else
@@ -658,7 +675,6 @@ int netif_netlink_addaddr(struct nlmsghdr *msg, struct nlattr **attr, void *hand
 
 int netif_netlink_deladdr(void *entry, struct nlmsghdr *msg, struct nlattr **attr, void *handle){
     struct stack_data *sd = (struct stack_data *) handle;
-	struct ifaddrmsg *ifa=(struct ifaddrmsg *)(msg+1);
     struct ip_addr_info *ipi = (struct ip_addr_info *) entry;
     void (*lock)(void) = RESOLVE_SYM(sys_lock_tcpip_core,void  (*)(void),sd);
     void (*unlock)(void) = RESOLVE_SYM(sys_unlock_tcpip_core,void  (*)(void),sd);
