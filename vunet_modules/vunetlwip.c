@@ -337,6 +337,8 @@ static void nl_dump1link(struct nlq_msg *msg, struct netif *nip) {
     char brd_addr[] = "\377\377\377\377\377\377";
     nlq_addattr(msg, IFLA_BROADCAST, brd_addr, 6);
     nlq_addattr(msg, IFLA_MTU, &(nip->mtu), sizeof(nip->mtu));
+    int tmp = 0;
+    nlq_addattr(msg, IFLA_TXQLEN, &tmp, sizeof(int));
 }
 
 int netif_netlink_getlink(void *entry, struct nlmsghdr *msg, struct nlattr **attr, struct nlq_msg
@@ -789,19 +791,26 @@ static int vunetlwip_shutdown(int sockfd, int how) {
 }
 
 static int vunetlwip_ioctl(int s, unsigned long cmd, void *argp) {
-#if DEBUG
-    if (s >= 0) /* XXX DEBUGGING */
-    {
-#endif
-        struct stack_data *sd = vunet_get_private_data();
-        int (*ioctl)(int, long, void *);
-        ioctl = RESOLVE_SYM(lwip_ioctl,int (*)(int, long, void *),sd);
-        return ioctl(s,cmd,argp);
-#if DEBUG
-    }
+    if (s < 0)
+        return vunet_is_netdev_ioctl(cmd) ? vunet_ioctl_parms(cmd) : -1;
     else
-        return -1;
-#endif
+    {
+        struct stack_data *sd = vunet_get_private_data();
+        switch (cmd)
+        {
+            case FIONREAD:
+            case FIONBIO:
+                {
+                    int (*ioctl)(int, long, void *);
+                    ioctl = RESOLVE_SYM(lwip_ioctl,int (*)(int, long, void *),sd);
+                    return ioctl(s,cmd,argp);
+                }
+            /* XXX I should make probably make a separate case for SIOCGIFCONF, as in the
+             * vuos_example of libnlq */
+            default:
+                return nlq_server_ioctl(handlers_table, sd, cmd, argp);
+        }
+    }
 }
 
 #if DEBUG
