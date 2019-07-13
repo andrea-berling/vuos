@@ -37,8 +37,9 @@ struct vu_module_t {
   char *description;
 };
 
+typedef unsigned long int syscall_arg_t;
 typedef long (*syscall_t)();
-extern uint16_t vu_arch_table[];
+extern const uint16_t vu_arch_table[];
 extern char *mountflag_strings[32];
 
 syscall_t *vu_syscall_handler_pointer(struct vu_service_t *service, char *name);
@@ -122,6 +123,9 @@ int VU_SYSNAME(name, setsockopt) (int sockfd, int level, int optname, \
 		const void *optval, socklen_t optlen, void *fdprivate); \
 int VU_SYSNAME(name, capget) (cap_user_header_t hdrp, cap_user_data_t datap); \
 int VU_SYSNAME(name, capset) (cap_user_header_t hdrp, const cap_user_data_t datap); \
+int VU_SYSNAME(name, clock_gettime) (clockid_t clk_id, struct timespec *tp); \
+int VU_SYSNAME(name, clock_settime) (clockid_t clk_id, const struct timespec *tp); \
+int VU_SYSNAME(name, clock_getres) (clockid_t clk_id, struct timespec *res); \
 \
 void VU_SYSNAME(name, cleanup) (uint8_t type, void *arg, int arglen, \
     struct vuht_entry_t *ht); \
@@ -171,6 +175,8 @@ struct binfmt_req_t {
 struct vuht_entry_t *vu_mod_getht(void);
 void vu_mod_setht(struct vuht_entry_t *ht);
 pid_t vu_mod_gettid();
+int vu_mod_getsyscall_number(void);
+syscall_arg_t vu_mod_getsyscall_arg(unsigned int narg); /* 0 - 5 */
 void vu_mod_peek_str(void *addr, void *buf, size_t datalen);
 char *vu_mod_peekdup_path(void *addr);
 void vu_mod_peek_data(void *addr, void *buf, size_t datalen);
