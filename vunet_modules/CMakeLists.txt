@@ -15,8 +15,9 @@ endforeach(VUNET_MOD)
 
 target_link_libraries(vunetvdestack vdeplug)
 add_subdirectory(lwip/contrib/ports/unix/lib)
-target_link_libraries(vunetlwip vpoll fduserdata nlq dl)
+target_link_libraries(vunetlwip vpoll fduserdata nlq dl lwip)
 target_include_directories(vunetlwip PRIVATE lwip/src/include
                                              lwip/contrib/ports/unix/lib
                                              lwip/contrib/ports/unix/port/include
+                                             lwip/contrib/addons/socket_event
                                              )
