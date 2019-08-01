@@ -81,12 +81,6 @@ const char* lwip_sym_names[] = { VUNETLWIP_SYMBOL_LIST };
 enum { VUNETLWIP_SYMBOL_LIST, SYM_NUM };
 #undef HELPER_MACRO
 
-#define DEBUG 1
-
-#if DEBUG
-struct stack_data *glob_sd;
-#endif
-
 /* In this macro x is purposedly written without parentheses around it to permit a return statement
  with nothing as an argument (e.g. in void functions). Use carefully
  */
@@ -103,14 +97,14 @@ struct stack_data {
     void *handle;               // Handle to lwip.so symbols
     struct netif *netif;        // Network interface
     void * lwipsymtab[SYM_NUM]; // Lwip symbol table, to retrieve stack functions and variables
-    FDUSERDATA *sockets_data;   // Used for event handling
+    FDUSERDATA *sockets_data;   // Used for event handling and Netlink sockets
 };
 
 struct fd_data {
-    struct epoll_event ev;
-    int fd;
-    unsigned char is_netlink;
-    struct nlq_msg *msgq;
+    struct epoll_event ev;      // Events virtualized processes are waiting on
+    int fd;                     // Eventfd used to signal events with vpoll
+    unsigned char is_netlink;   // A flag indicating if this is a Netlink socket
+    struct nlq_msg *msgq;       // Queue of Netlink messages for stack configuration
 };
 
 static int vunetlwip_socket(int domain, int type, int protocol){
@@ -139,11 +133,9 @@ static int vunetlwip_socket(int domain, int type, int protocol){
     {
         struct fd_data *fdd = fduserdata_new(sd->sockets_data,fd,struct fd_data);
         if (!fdd) {errno = ENOMEM; return -1;}
-        // XXX Should I use some particular flag?
-        fdd->fd = vpoll_create(0,0);
+        fdd->fd = vpoll_create(EPOLLOUT,0); /* The socket is ready for packet sending */
         fdd->is_netlink = is_netlink;
         fdd->msgq = NULL;
-        vpoll_ctl(fdd->fd,VPOLL_CTL_ADDEVENTS,EPOLLOUT); /* The socket is ready for packet sending */
         fduserdata_put(fdd);
         return fd;
     }
@@ -310,8 +302,8 @@ void *netif_netlink_searchlink(struct nlmsghdr *msg, struct nlattr **attr, void 
     void (*lock)(void) = RESOLVE_SYM(sys_lock_tcpip_core,void  (*)(void),sd);
     void (*unlock)(void) = RESOLVE_SYM(sys_unlock_tcpip_core,void  (*)(void),sd);
     void *ret = NULL;
-    // To call raw api functions (netif_find and netif_get_by_index) there is the need to acquire
-    // the TCPIP core lock
+    // In order to call raw api functions (netif_find and netif_get_by_index) we need to acquire the
+    // TCPIP core lock
     lock();
     ret = netif_get_by_index(ifi->ifi_index);
     if (!ret && attr[IFLA_IFNAME] != NULL)
@@ -332,7 +324,6 @@ static void nl_dump1link(struct nlq_msg *msg, struct netif *nip) {
     name[2] = nip->num % 10 + '0';
     name[3]=0;
     nlq_addattr(msg, IFLA_IFNAME, name, sizeof(name));
-    // TODO Could probably abstract all this in a macro, or look for a macro in the lwipv6 code
     char brd_addr[] = "\377\377\377\377\377\377";
     nlq_addattr(msg, IFLA_BROADCAST, brd_addr, 6);
     nlq_addattr(msg, IFLA_MTU, &(nip->mtu), sizeof(nip->mtu));
@@ -393,7 +384,7 @@ int prefixlen_from_mask(uint32_t mask)
 
 struct ip_addr_info {
     struct netif *nip;  // Interface having the required address
-    int addr_idx;       // Index in the netif IPv6 addresses array; i < 0 then the required address is IPv4
+    int addr_idx;       // Index in the netif IPv6 addresses array; if < 0 then the required address is IPv4
 };
 
 int compare_addresses(const ip_addr_t *addr1, uint32_t *addr2, int is_v4)
@@ -410,7 +401,6 @@ int compare_addresses(const ip_addr_t *addr1, uint32_t *addr2, int is_v4)
     }
 }
 
-// XXX to be debugged
 void *netif_netlink_searchaddr(struct nlmsghdr *msg, struct nlattr **attr, void *handle) {
 	struct ifaddrmsg *ifa=(struct ifaddrmsg *)(msg+1);
     struct stack_data *sd = (struct stack_data *) handle;
@@ -781,8 +771,8 @@ static int vunetlwip_ioctl(int s, unsigned long cmd, void *argp) {
                     ioctl = RESOLVE_SYM(lwip_ioctl,int (*)(int, long, void *),sd);
                     return ioctl(s,cmd,argp);
                 }
-            /* XXX I should make probably make a separate case for SIOCGIFCONF, as in the
-             * vuos_example of libnlq */
+            /* XXX I should probably make a separate case for SIOCGIFCONF, as in the vuos_example of
+             * libnlq */
             default:
                 return nlq_server_ioctl(handlers_table, sd, cmd, argp);
         }
@@ -806,18 +796,6 @@ static int vunetlwip_fcntl(int s, int cmd, long val) {
 }
 
 static int vunetlwip_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event) {
-    // TODO
-    /* Roadmap:
-     *  - add the hooks in lwip that notifies about events on the socket
-     *  - define the fduserdata table that maps lwip socket fds to vpoll eventfds and respective
-     *  epoll_data
-     *  - implement the epoll_ctl, this way:
-     *    - use the given epfd and add/del/mod the efd corresponding to the given fd
-     *    - save the event and data in the fduserdata table
-     *  - What does the user defined hook do? It looks up the socket fd in the table, checks the
-     *  signaled event and the saved events for that fd. Based on that, it calls vpoll to signal of
-     *  the efd the right event to the vuos core
-    */
     struct stack_data *sd = vunet_get_private_data();
     struct fd_data *fdd;
     if ((fdd = fduserdata_get(sd->sockets_data,fd)) == NULL)
@@ -825,7 +803,6 @@ static int vunetlwip_epoll_ctl(int epfd, int op, int fd, struct epoll_event *eve
     else
     {
         fdd->ev.events = event ? event->events : 0;
-        //fd->ev->data = event->data;
         epoll_ctl(epfd,op,fdd->fd,event);
         fduserdata_put(fdd);
         return 0;
@@ -1027,32 +1004,24 @@ static void init_func(void *arg){
     netif_add(sd->netif,NULL,NULL,NULL,NULL,tapif_init,tcpipinput);
 }
 
-static int update_socket_events(int s, int pollin, int pollout, int pollerr, int *err) {
+static int update_socket_events(int s, unsigned char events, void *arg, int *err) {
     // XXX as of this moment, using the emulation layer of vpoll, pollerr events can't really be
     // signaled
-#if DEBUG
-    struct stack_data *sd = glob_sd;
-#else
-    struct stack_data *sd = vunet_get_private_data();
-#endif
+    struct stack_data *sd = (struct stack_data*) arg;
     struct fd_data *fdd;
 
     fdd = fduserdata_get(sd->sockets_data,s);
-    //fprintf(stderr,"Socket: %d, pollin %d, pollout %d, pollerr %d\n", s, pollin & 1, pollout & 1, pollerr & 1);
     if (fdd)
     {
-        uint32_t events = 0;
-        if (pollin && (fdd->ev.events && EPOLLIN))
-            events |= EPOLLIN;
-        if (pollout && (fdd->ev.events && EPOLLOUT))
-            events |= EPOLLOUT;
-        if (pollerr && (fdd->ev.events && EPOLLERR))
-            events |= EPOLLERR;
-        //fprintf(stderr,"Setting events: %d\n",events);
-        vpoll_ctl(fdd->fd,VPOLL_CTL_SETEVENTS,events);
-        //fprintf(stderr,"I get deadlocked here?\n",events);
+        uint32_t sock_events = 0;
+        if (SOCKEVENT_IS_POLLIN(events) && (fdd->ev.events && EPOLLIN))
+            sock_events |= EPOLLIN;
+        if (SOCKEVENT_IS_POLLOUT(events) && (fdd->ev.events && EPOLLOUT))
+            sock_events |= EPOLLOUT;
+        if (SOCKEVENT_IS_POLLERR(events) && (fdd->ev.events && EPOLLERR))
+            sock_events |= EPOLLERR;
+        vpoll_ctl(fdd->fd,VPOLL_CTL_SETEVENTS,sock_events);
         fduserdata_put(fdd);
-        //fprintf(stderr,"Damn\n",events);
         return 0;
     }
     else
@@ -1087,10 +1056,7 @@ static int vunetlwip_init(const char *source, unsigned long flags, const char *a
             }
         }
         (RESOLVE_SYM(tcpip_init,void (*)(tcpip_init_done_fn, void *),sd))(init_func,sd);
-        (RESOLVE_SYM(register_socket_event_callback, int (*)(int (*)(int, int, int, int, int*)),sd))(update_socket_events);
-#if DEBUG
-        glob_sd = sd;
-#endif
+        (RESOLVE_SYM(register_socket_event_callback, int (*)(int (*)(int, unsigned char, void*, int*), void*),sd))(update_socket_events,sd);
         *private_data = sd;
         return 0;
 mem_error:
