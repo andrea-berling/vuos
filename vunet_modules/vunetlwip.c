@@ -82,16 +82,16 @@ enum { VUNETLWIP_SYMBOL_LIST, SYM_NUM };
 #undef HELPER_MACRO
 
 /* In this macro x is purposedly written without parentheses around it to permit a return statement
- with nothing as an argument (e.g. in void functions). Use carefully
- */
+   with nothing as an argument (e.g. in void functions). Use carefully
+   */
 #define DL_ERROR(x) do {\
     fprintf(stderr,"vunetlwip.c, line:%d, %s\n",__LINE__,dlerror());\
     return x;\
-    } while(0)
+} while(0)
 
 #define EFD_TBL_SIZE 64
 
-#define RESOLVE_SYM(s,type,sd) ((type) ((sd)->lwipsymtab[s##_IDX]))
+#define RESOLVE_SYM(var,s,sd) (var = (typeof(var)) ((sd)->lwipsymtab[s##_IDX]))
 
 struct stack_data {
     void *handle;               // Handle to lwip.so symbols
@@ -112,7 +112,7 @@ static int vunetlwip_socket(int domain, int type, int protocol){
     int fd;
     int is_netlink = 0;
     int (*socket)(int,int,int);
-    socket = RESOLVE_SYM(lwip_socket,int (*)(int,int,int),sd);
+    RESOLVE_SYM(socket,lwip_socket,sd);
     if (domain != AF_NETLINK)
     {
         /* lwip assumes that every SOCK_DGRAM socket is a UDP socket. Thus, when DGRAM is used to
@@ -150,7 +150,7 @@ static int vunetlwip_bind(int sockfd, const struct sockaddr *addr, socklen_t add
     {
         if (fdd) fduserdata_put(fdd);
         int (*bind)(int,const struct sockaddr *,socklen_t);
-        bind = RESOLVE_SYM(lwip_bind,int (*)(int,const struct sockaddr *,socklen_t),sd);
+        RESOLVE_SYM(bind,lwip_bind,sd);
         return bind(sockfd,addr,addrlen);
     }
     else
@@ -163,14 +163,14 @@ static int vunetlwip_bind(int sockfd, const struct sockaddr *addr, socklen_t add
 static int vunetlwip_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
     struct stack_data *sd = vunet_get_private_data();
     int (*connect)(int,const struct sockaddr *,socklen_t);
-    connect = RESOLVE_SYM(lwip_connect,int (*)(int,const struct sockaddr *,socklen_t),sd);
+    RESOLVE_SYM(connect,lwip_connect,sd);
     return connect(sockfd,addr,addrlen);
 }
 
 static int vunetlwip_listen(int sockfd, int backlog) {
     struct stack_data *sd = vunet_get_private_data();
     int (*listen)(int,int);
-    listen = RESOLVE_SYM(lwip_listen,int (*)(int,int),sd);
+    RESOLVE_SYM(listen,lwip_listen,sd);
     return listen(sockfd,backlog);
 }
 
@@ -178,7 +178,7 @@ static int vunetlwip_accept4(int sockfd, struct sockaddr *addr, socklen_t *addrl
     // FIXME The flags are currently ignored
     struct stack_data *sd = vunet_get_private_data();
     int (*accept)(int,struct sockaddr *,socklen_t *);
-    accept = RESOLVE_SYM(lwip_accept,int (*)(int,struct sockaddr *,socklen_t *),sd);
+    RESOLVE_SYM(accept,lwip_accept,sd);
     return accept(sockfd,addr,addrlen);
 }
 
@@ -189,7 +189,7 @@ static int vunetlwip_getsockname(int sockfd, struct sockaddr *addr, socklen_t *a
     {
         if (fdd) fduserdata_put(fdd);
         int (*getsockname)(int,struct sockaddr *,socklen_t *);
-        getsockname = RESOLVE_SYM(lwip_getsockname,int (*)(int,struct sockaddr *,socklen_t *),sd);
+        RESOLVE_SYM(getsockname,lwip_getsockname,sd);
         return getsockname(sockfd,addr,addrlen);
     }
     else
@@ -208,7 +208,7 @@ static int vunetlwip_getsockname(int sockfd, struct sockaddr *addr, socklen_t *a
 static int vunetlwip_getpeername(int sockfd, struct sockaddr *addr, socklen_t *addrlen) {
     struct stack_data *sd = vunet_get_private_data();
     int (*getpeername)(int,struct sockaddr *,socklen_t *);
-    getpeername = RESOLVE_SYM(lwip_getpeername,int (*)(int,struct sockaddr *,socklen_t *),sd);
+    RESOLVE_SYM(getpeername,lwip_getpeername,sd);
     return getpeername(sockfd,addr,addrlen);
 }
 
@@ -256,7 +256,7 @@ static ssize_t vunetlwip_recvmsg(int sockfd, struct msghdr *msg, int flags) {
     {
         if (fdd) fduserdata_put(fdd);
         ssize_t (*recvmsg)(int,struct msghdr *,int);
-        recvmsg = RESOLVE_SYM(lwip_recvmsg,ssize_t (*)(int,struct msghdr *,int),sd);
+        RESOLVE_SYM(recvmsg,lwip_recvmsg,sd);
         return recvmsg(sockfd,msg,flags);
     }
     else
@@ -296,11 +296,15 @@ static ssize_t vunetlwip_recvmsg(int sockfd, struct msghdr *msg, int flags) {
 
 void *netif_netlink_searchlink(struct nlmsghdr *msg, struct nlattr **attr, void *handle) {
     struct stack_data *sd = (struct stack_data *) handle;
-	struct ifinfomsg *ifi=(struct ifinfomsg *)(msg+1);
-    struct netif * (*netif_find)(const char *) = RESOLVE_SYM(netif_find,struct netif * (*)(const char *),sd);
-    struct netif * (*netif_get_by_index)(u8_t) = RESOLVE_SYM(netif_get_by_index,struct netif * (*)(u8_t) ,sd);
-    void (*lock)(void) = RESOLVE_SYM(sys_lock_tcpip_core,void  (*)(void),sd);
-    void (*unlock)(void) = RESOLVE_SYM(sys_unlock_tcpip_core,void  (*)(void),sd);
+    struct ifinfomsg *ifi=(struct ifinfomsg *)(msg+1);
+    struct netif * (*netif_find)(const char *);
+    RESOLVE_SYM(netif_find,netif_find,sd);
+    struct netif * (*netif_get_by_index)(u8_t);
+    RESOLVE_SYM(netif_get_by_index,netif_get_by_index,sd);
+    void (*lock)(void);
+    RESOLVE_SYM(lock,sys_lock_tcpip_core,sd);
+    void (*unlock)(void);
+    RESOLVE_SYM(unlock,sys_unlock_tcpip_core,sd);
     void *ret = NULL;
     // In order to call raw api functions (netif_find and netif_get_by_index) we need to acquire the
     // TCPIP core lock
@@ -335,35 +339,38 @@ int netif_netlink_getlink(void *entry, struct nlmsghdr *msg, struct nlattr **att
         **reply_msgq, void *handle)
 {
     struct stack_data *sd = (struct stack_data *) handle;
-	if (entry == NULL) { // DUMP
+    if (entry == NULL) { // DUMP
         struct netif *nip;
-        struct netif *netif_list = RESOLVE_SYM(netif_list,struct netif *,sd);
-		for (nip = netif_list; nip != NULL ; nip = nip->next) {
-			struct nlq_msg *newmsg = nlq_createmsg(RTM_NEWLINK, NLM_F_MULTI, msg->nlmsg_seq, 0);
-			nl_dump1link(newmsg, nip);
-			nlq_complete_enqueue(newmsg, reply_msgq);
-		}
-		return 0;
-	} else {
-		struct nlq_msg *newmsg = nlq_createmsg(RTM_NEWLINK, 0, msg->nlmsg_seq, 0);
-		nl_dump1link(newmsg, entry);
-		nlq_complete_enqueue(newmsg, reply_msgq);
-		return 1;
-	}
+        struct netif *netif_list;
+        RESOLVE_SYM(netif_list,netif_list,sd);
+        for (nip = netif_list; nip != NULL ; nip = nip->next) {
+            struct nlq_msg *newmsg = nlq_createmsg(RTM_NEWLINK, NLM_F_MULTI, msg->nlmsg_seq, 0);
+            nl_dump1link(newmsg, nip);
+            nlq_complete_enqueue(newmsg, reply_msgq);
+        }
+        return 0;
+    } else {
+        struct nlq_msg *newmsg = nlq_createmsg(RTM_NEWLINK, 0, msg->nlmsg_seq, 0);
+        nl_dump1link(newmsg, entry);
+        nlq_complete_enqueue(newmsg, reply_msgq);
+        return 1;
+    }
 }
 
 int netif_netlink_setlink(void *entry, struct nlmsghdr *msg, struct nlattr **attr, void *handle){
     // XXX Right now it only supports set up and down as a link modification
     struct stack_data *sd = (struct stack_data *) handle;
-	struct ifinfomsg *ifi=(struct ifinfomsg *)(msg+1);
+    struct ifinfomsg *ifi=(struct ifinfomsg *)(msg+1);
     struct netif *nip = (struct netif *) entry;
-    void (*lock)(void) = RESOLVE_SYM(sys_lock_tcpip_core,void  (*)(void),sd);
-    void (*unlock)(void) = RESOLVE_SYM(sys_unlock_tcpip_core,void  (*)(void),sd);
+    void (*lock)(void);
+    RESOLVE_SYM(lock,sys_lock_tcpip_core,sd);
+    void (*unlock)(void);
+    RESOLVE_SYM(unlock,sys_unlock_tcpip_core,sd);
     void (*netif_setupdown)(struct netif *);
     if (ifi->ifi_flags & IFF_UP)
-        netif_setupdown = RESOLVE_SYM(netif_set_up,void  (*)(struct netif *),sd);
+        RESOLVE_SYM(netif_setupdown,netif_set_up,sd);
     else
-        netif_setupdown = RESOLVE_SYM(netif_set_down,void  (*)(struct netif *),sd);
+        RESOLVE_SYM(netif_setupdown,netif_set_down,sd);
     lock();
     netif_setupdown(nip);
     unlock();
@@ -402,13 +409,16 @@ int compare_addresses(const ip_addr_t *addr1, uint32_t *addr2, int is_v4)
 }
 
 void *netif_netlink_searchaddr(struct nlmsghdr *msg, struct nlattr **attr, void *handle) {
-	struct ifaddrmsg *ifa=(struct ifaddrmsg *)(msg+1);
+    struct ifaddrmsg *ifa=(struct ifaddrmsg *)(msg+1);
     struct stack_data *sd = (struct stack_data *) handle;
-    void (*lock)(void) = RESOLVE_SYM(sys_lock_tcpip_core,void  (*)(void),sd);
-    void (*unlock)(void) = RESOLVE_SYM(sys_unlock_tcpip_core,void  (*)(void),sd);
-    struct netif * (*netif_get_by_index)(u8_t) = RESOLVE_SYM(netif_get_by_index,struct netif * (*)(u8_t) ,sd);
+    void (*lock)(void);
+    RESOLVE_SYM(lock,sys_lock_tcpip_core,sd);
+    void (*unlock)(void);
+    RESOLVE_SYM(unlock,sys_unlock_tcpip_core,sd);
+    struct netif * (*netif_get_by_index)(u8_t);
+    RESOLVE_SYM(netif_get_by_index,netif_get_by_index,sd);
     lock();
-	struct netif *nip = netif_get_by_index(ifa->ifa_index);
+    struct netif *nip = netif_get_by_index(ifa->ifa_index);
     if (nip)
     {
         /* As per man 7 rtnetlink ifa_family can currently be either AF_INET or AF_INET6 */
@@ -417,7 +427,7 @@ void *netif_netlink_searchaddr(struct nlmsghdr *msg, struct nlattr **attr, void 
             if (ifa->ifa_prefixlen == prefixlen_from_mask(ntohl((netif_ip4_netmask(nip))->addr)) &&
                     attr[IFA_ADDRESS] != NULL &&
                     compare_addresses(netif_ip_addr4(nip),(uint32_t*)(attr[IFA_ADDRESS]+1),1)
-                    )
+               )
             {
                 struct ip_addr_info *ipi = (struct ip_addr_info *) malloc(sizeof(struct ip_addr_info));
                 if (!ipi)
@@ -488,47 +498,51 @@ static void nl_dump1addr(struct nlq_msg *msg, const ip_addr_t *ip, uint32_t netm
 
     // TODO scope resolution, flags support (probably absent from lwip)
     /*
-    if ((ntohl(ipl->ipaddr.addr[0]) & 0xff000000) == 0xfe000000) {
-        if ((ntohl(ipl->ipaddr.addr[0]) & 0xC00000) == 0x800000)
-            scope=RT_SCOPE_LINK;
-        else if ((ntohl(ipl->ipaddr.addr[0]) & 0xC00000)== 0x08000000)
-            scope=RT_SCOPE_SITE;
-    } else if ((ntohl(ipl->ipaddr.addr[0]) & 0xff000000) == 0) {
-        if (ip_addr_is_v4comp(&(ipl->ipaddr))) {
-            if (ntohl(ipl->ipaddr.addr[3]) >> 24 == 0x7f)
-                scope=RT_SCOPE_HOST;
-        } else
-            scope=RT_SCOPE_HOST;
-    }
-    */
+       if ((ntohl(ipl->ipaddr.addr[0]) & 0xff000000) == 0xfe000000) {
+       if ((ntohl(ipl->ipaddr.addr[0]) & 0xC00000) == 0x800000)
+       scope=RT_SCOPE_LINK;
+       else if ((ntohl(ipl->ipaddr.addr[0]) & 0xC00000)== 0x08000000)
+       scope=RT_SCOPE_SITE;
+       } else if ((ntohl(ipl->ipaddr.addr[0]) & 0xff000000) == 0) {
+       if (ip_addr_is_v4comp(&(ipl->ipaddr))) {
+       if (ntohl(ipl->ipaddr.addr[3]) >> 24 == 0x7f)
+       scope=RT_SCOPE_HOST;
+       } else
+       scope=RT_SCOPE_HOST;
+       }
+       */
 
-	nlq_addstruct(msg, ifaddrmsg,
-			.ifa_family=family,
-			.ifa_prefixlen=prefixlen,
+    nlq_addstruct(msg, ifaddrmsg,
+            .ifa_family=family,
+            .ifa_prefixlen=prefixlen,
             .ifa_index=index,
             .ifa_flags=0,
-			.ifa_scope=scope
-			);
+            .ifa_scope=scope
+            );
 
-	if (isv4)
+    if (isv4)
         nlq_addattr(msg, IFA_ADDRESS, &(ip_2_ip4(ip)->addr), sizeof(uint32_t));
-	else
+    else
         nlq_addattr(msg, IFA_ADDRESS, (ip_2_ip6(ip))->addr, 4*sizeof(uint32_t));
 }
 
 int netif_netlink_getaddr(void *entry, struct nlmsghdr *msg, struct nlattr **attr, struct nlq_msg
         **reply_msgq, void *handle){
     struct stack_data *sd = (struct stack_data *) handle;
-	struct ifaddrmsg *ifa=(struct ifaddrmsg *)(msg+1);
+    struct ifaddrmsg *ifa=(struct ifaddrmsg *)(msg+1);
     struct ip_addr_info *ipi = (struct ip_addr_info *) entry;
-    void (*lock)(void) = RESOLVE_SYM(sys_lock_tcpip_core,void  (*)(void),sd);
-    void (*unlock)(void) = RESOLVE_SYM(sys_unlock_tcpip_core,void  (*)(void),sd);
-    struct netif *netif_list = RESOLVE_SYM(netif_list,struct netif *,sd);
-    struct netif * (*netif_get_by_index)(u8_t) = RESOLVE_SYM(netif_get_by_index,struct netif * (*)(u8_t) ,sd);
+    void (*lock)(void);
+    RESOLVE_SYM(lock,sys_lock_tcpip_core,sd);
+    void (*unlock)(void);
+    RESOLVE_SYM(unlock,sys_unlock_tcpip_core,sd);
+    struct netif *netif_list;
+    RESOLVE_SYM(netif_list,netif_list,sd);
+    struct netif * (*netif_get_by_index)(u8_t);
+    RESOLVE_SYM(netif_get_by_index,netif_get_by_index,sd);
     lock();
     if (entry == NULL) {
         struct netif *nip = netif_get_by_index(ifa->ifa_index);
-		for (nip = netif_list; nip != NULL ; nip = nip->next)
+        for (nip = netif_list; nip != NULL ; nip = nip->next)
         {
             int idx = netif_get_index(nip);
             struct nlq_msg *newmsg = nlq_createmsg(RTM_NEWADDR, NLM_F_MULTI, msg->nlmsg_seq, 0);
@@ -607,25 +621,27 @@ int ip_addr_and_netmask_from_netlink_msg(struct ifaddrmsg *ifa, struct nlattr
 
 int netif_netlink_addaddr(struct nlmsghdr *msg, struct nlattr **attr, void *handle){
     struct stack_data *sd = (struct stack_data *) handle;
-	struct ifaddrmsg *ifa=(struct ifaddrmsg *)(msg+1);
-	struct netif *nip;
-	ip_addr_t ipaddr,netmask;
-    void (*lock)(void) = RESOLVE_SYM(sys_lock_tcpip_core,void  (*)(void),sd);
-    void (*unlock)(void) = RESOLVE_SYM(sys_unlock_tcpip_core,void  (*)(void),sd);
-    struct netif * (*netif_get_by_index)(u8_t) = RESOLVE_SYM(netif_get_by_index,struct netif * (*)(u8_t) ,sd);
-    void (*netif_set_addr) (struct netif *, const ip4_addr_t *, const ip4_addr_t *, const ip4_addr_t
-            *) = RESOLVE_SYM(netif_set_addr,void (*)(struct netif *, const ip4_addr_t *, const ip4_addr_t *,
-                const ip4_addr_t *),sd);
-    err_t (*netif_add_ip6_address)(struct netif *, const ip6_addr_t *, s8_t *) =
-        RESOLVE_SYM(netif_add_ip6_address,err_t (*)(struct netif *, const ip6_addr_t *, s8_t *),sd);
+    struct ifaddrmsg *ifa=(struct ifaddrmsg *)(msg+1);
+    struct netif *nip;
+    ip_addr_t ipaddr,netmask;
+    void (*lock)(void);
+    RESOLVE_SYM(lock,sys_lock_tcpip_core,sd);
+    void (*unlock)(void);
+    RESOLVE_SYM(unlock,sys_unlock_tcpip_core,sd);
+    struct netif * (*netif_get_by_index)(u8_t);
+    RESOLVE_SYM(netif_get_by_index,netif_get_by_index,sd);
+    void (*netif_set_addr) (struct netif *, const ip4_addr_t *, const ip4_addr_t *, const ip4_addr_t *);
+    RESOLVE_SYM(netif_set_addr,netif_set_addr,sd);
+    err_t (*netif_add_ip6_address)(struct netif *, const ip6_addr_t *, s8_t *);
+    RESOLVE_SYM(netif_add_ip6_address,netif_add_ip6_address,sd);
     lock();
 
-	nip=netif_get_by_index(ifa->ifa_index);
-	if (nip == NULL) {
+    nip=netif_get_by_index(ifa->ifa_index);
+    if (nip == NULL) {
         unlock();
-		fprintf(stderr,"Netlink add index error\n");
-		return -ENODEV;
-	}
+        fprintf(stderr,"Netlink add index error\n");
+        return -ENODEV;
+    }
 
     int n;
     n = ip_addr_and_netmask_from_netlink_msg(ifa,attr,&ipaddr,&netmask);
@@ -644,14 +660,14 @@ int netif_netlink_addaddr(struct nlmsghdr *msg, struct nlattr **attr, void *hand
 int netif_netlink_deladdr(void *entry, struct nlmsghdr *msg, struct nlattr **attr, void *handle){
     struct stack_data *sd = (struct stack_data *) handle;
     struct ip_addr_info *ipi = (struct ip_addr_info *) entry;
-    void (*lock)(void) = RESOLVE_SYM(sys_lock_tcpip_core,void  (*)(void),sd);
-    void (*unlock)(void) = RESOLVE_SYM(sys_unlock_tcpip_core,void  (*)(void),sd);
-    void (*netif_set_addr) (struct netif *, const ip4_addr_t *, const ip4_addr_t *, const ip4_addr_t
-            *) = RESOLVE_SYM(netif_set_addr,void (*)(struct netif *, const ip4_addr_t *, const ip4_addr_t *,
-                const ip4_addr_t *),sd);
-    void (*netif_ip6_addr_set_state)(struct netif*, s8_t, u8_t) =
-        RESOLVE_SYM(netif_ip6_addr_set_state,void (*)(struct netif*, s8_t, u8_t),sd);
-    lock();
+    void (*lock)(void);
+    RESOLVE_SYM(lock,sys_lock_tcpip_core,sd);
+    void (*unlock)(void);
+    RESOLVE_SYM(unlock,sys_unlock_tcpip_core,sd);
+    void (*netif_set_addr) (struct netif *, const ip4_addr_t *, const ip4_addr_t *, const ip4_addr_t *);
+    RESOLVE_SYM(netif_set_addr,netif_set_addr,sd);
+    void (*netif_ip6_addr_set_state)(struct netif*, s8_t, u8_t);
+    RESOLVE_SYM(netif_ip6_addr_set_state,netif_ip6_addr_set_state,sd); lock();
 
     if (ipi->addr_idx < 0)
         netif_set_addr(ipi->nip,NULL,NULL,NULL);
@@ -667,9 +683,9 @@ nlq_request_handlers_table handlers_table = {
     [RTMF_ADDR]={netif_netlink_searchaddr, netif_netlink_getaddr, netif_netlink_addaddr,
         netif_netlink_deladdr, NULL}
     /*
-    [RTMF_ROUTE]={ip_route_netlink_searchroute, ip_route_netlink_getroute,
-        ip_route_netlink_addroute, ip_route_netlink_delroute, NULL}
-    */
+       [RTMF_ROUTE]={ip_route_netlink_searchroute, ip_route_netlink_getroute,
+       ip_route_netlink_addroute, ip_route_netlink_delroute, NULL}
+       */
 };
 
 static ssize_t vunetlwip_sendto(const void *buf, size_t len, struct fd_data *fdd)
@@ -701,7 +717,7 @@ static ssize_t vunetlwip_sendmsg(int sockfd, const struct msghdr *msg, int flags
     {
         if (fdd) fduserdata_put(fdd);
         ssize_t (*sendmsg)(int,const struct msghdr *,int);
-        sendmsg = RESOLVE_SYM(lwip_sendmsg,ssize_t (*)(int,const struct msghdr *,int),sd);
+        RESOLVE_SYM(sendmsg,lwip_sendmsg,sd);
         return sendmsg(sockfd,msg,flags);
     }
     else
@@ -736,7 +752,7 @@ static int vunetlwip_setsockopt(int sockfd, int level, int optname, const void *
     // useful
     struct stack_data *sd = vunet_get_private_data();
     int (*setsockopt)(int, int,int,const void *,socklen_t);
-    setsockopt = RESOLVE_SYM(lwip_setsockopt,int (*)(int, int,int,const void *,socklen_t),sd);
+    RESOLVE_SYM(setsockopt,lwip_setsockopt,sd);
     return setsockopt(sockfd,level,optname,optval,optlen);
 }
 
@@ -745,14 +761,14 @@ static int vunetlwip_getsockopt(int sockfd, int level, int optname, void *optval
     // useful
     struct stack_data *sd = vunet_get_private_data();
     int (*getsockopt)(int, int,int,void *,socklen_t *);
-    getsockopt = RESOLVE_SYM(lwip_getsockopt,int(*)(int, int,int,void *,socklen_t *),sd);
+    RESOLVE_SYM(getsockopt,lwip_getsockopt,sd);
     return getsockopt(sockfd,level,optname,optval,optlen);
 }
 
 static int vunetlwip_shutdown(int sockfd, int how) {
     struct stack_data *sd = vunet_get_private_data();
     int (*shutdown)(int,int);
-    shutdown = RESOLVE_SYM(lwip_shutdown,int (*)(int, int),sd);
+    RESOLVE_SYM(shutdown,lwip_shutdown,sd);
     return shutdown(sockfd,how);
 }
 
@@ -768,11 +784,11 @@ static int vunetlwip_ioctl(int s, unsigned long cmd, void *argp) {
             case FIONBIO:
                 {
                     int (*ioctl)(int, long, void *);
-                    ioctl = RESOLVE_SYM(lwip_ioctl,int (*)(int, long, void *),sd);
+                    RESOLVE_SYM(ioctl,lwip_ioctl,sd);
                     return ioctl(s,cmd,argp);
                 }
-            /* XXX I should probably make a separate case for SIOCGIFCONF, as in the vuos_example of
-             * libnlq */
+                /* XXX I should probably make a separate case for SIOCGIFCONF, as in the vuos_example of
+                 * libnlq */
             default:
                 return nlq_server_ioctl(handlers_table, sd, cmd, argp);
         }
@@ -784,14 +800,14 @@ static int vunetlwip_close(int fd) {
     struct fd_data *fdd = fduserdata_get(sd->sockets_data,fd);
     if (fdd) fduserdata_del(fdd);
     int (*close)(int);
-    close = RESOLVE_SYM(lwip_close,int (*)(int),sd);
+    RESOLVE_SYM(close,lwip_close,sd);
     return close(fd);
 }
 
 static int vunetlwip_fcntl(int s, int cmd, long val) {
     struct stack_data *sd = vunet_get_private_data();
     int (*fcntl)(int,int,long);
-    fcntl = RESOLVE_SYM(lwip_fcntl,int (*)(int,int,long),sd);
+    RESOLVE_SYM(fcntl,lwip_fcntl,sd);
     return fcntl(s,cmd,val);
 }
 
@@ -811,15 +827,15 @@ static int vunetlwip_epoll_ctl(int epfd, int op, int fd, struct epoll_event *eve
 
 static int vunetlwip_supported_domain(int domain)
 {
-	switch(domain) {
-		case AF_INET:
-		case PF_INET6:
-		case PF_NETLINK:
-		//case PF_PACKET:
-			return 1;
-		default:
-			return 0;
-	}
+    switch(domain) {
+        case AF_INET:
+        case PF_INET6:
+        case PF_NETLINK:
+            //case PF_PACKET:
+            return 1;
+        default:
+            return 0;
+    }
 }
 
 static int vunetlwip_supported_ioctl(unsigned long request)
@@ -827,167 +843,6 @@ static int vunetlwip_supported_ioctl(unsigned long request)
     // TODO
     return 0;
 }
-
-#if 0
-static char *intname[]={"vd","tn","tp"};
-#define INTTYPES (sizeof(intname)/sizeof(char *))
-static char *paramname[]={"ra"};
-#define PARAMTYPES (sizeof(paramname)/sizeof(char *))
-
-struct ifname {
-	unsigned char type;
-	unsigned char num;
-	char *name;
-	struct ifname *next;
-};
-
-static void iffree(struct ifname *head)
-{
-	if (head==NULL)
-		return;
-	else {
-		iffree(head->next);
-		free(head->name);
-		free(head);
-	}
-}
-
-static char *ifname(struct ifname *head,unsigned char type,unsigned char num)
-{
-	if (head==NULL)
-		return NULL;
-	else if (head->type == type && head->num == num)
-		return head->name;
-	else return ifname(head->next,type,num);
-}
-
-static void ifaddname(struct ifname **head,char type,char num,char *name)
-{
-	struct ifname *thisif=malloc(sizeof (struct ifname));
-	if (thisif != NULL) {
-		thisif->type=type;
-		thisif->num=num;
-		thisif->name=strdup(name);
-		thisif->next=*head;
-		*head=thisif;
-	}
-}
-
-static void myputenv(struct ifname **head, int *intnum, char *paramval[], char *arg)
-{
-	int i;
-    /* For each interface type */
-	for (i=0;i<INTTYPES;i++) {
-        /* If a supported interface + a digit has been supplied */
-		if (strncmp(arg,intname[i],2)==0 && arg[2] >= '0' && arg[2] <= '9') {
-            /* If a named interface has been supplied */
-			if (arg[3] == '=') {
-                /* Add the given interface to head */
-				ifaddname(head, i,arg[2]-'0',arg+4);
-				if (arg[2]-'0'+1 > intnum[i]) intnum[i]=arg[2]-'0'+1;
-			}
-            /* Else just change the number of the supplied interface type, if needed */
-			else if (arg[3] == 0) {
-				if (arg[2]-'0' > intnum[i]) intnum[i]=arg[2]-'0';
-			}
-			break;
-		}
-	}
-
-    /* If a parameter has been supplied, set paramval[i] pointer to the value of the given parameter
-     * */
-	for (i=0;i<PARAMTYPES;i++) {
-		if (strncmp(arg,paramname[i],2)==0) {
-			if (arg[2] == '=') {
-				paramval[i]=arg+3;
-			}
-		}
-	}
-}
-
-static char stdargs[]="vd1";
-static void lwipargtoenv(struct stack *s,char *initargs)
-{
-	char *next;
-	char *unquoted;
-	char quoted=0;
-	char totint=0;
-	register int i,j;
-	struct ifname *ifh=NULL;
-	int intnum[INTTYPES];
-	char *paramval[PARAMTYPES];
-
-	memset(intnum,0,sizeof(intnum));
-	memset(paramval,0,sizeof(paramval));
-
-	if (initargs==0 || *initargs == 0) initargs=stdargs;
-	if (strcmp(initargs,"lo") != 0) {
-        /* Until we reach the end of the initargs string */
-		while (*initargs != 0) {
-            /* Position next and unquoted at the position pointed by initargs of the input string */
-			next=initargs;
-			unquoted=initargs;
-            /* Up until we reach a comma or a quoting sign, as long as we have not reached the end */
-            while ((*next != ',' || quoted) && *next != 0) {
-                /* Save the character pointed by next in the unquoted string at the position pointed
-                 * by unquoted */
-                *unquoted=*next;
-                /* If we reached the second quoting, turn off the quote flag */
-                if (*next == quoted)
-                    quoted=0;
-                /* If we reach the first quoting, turn on the quote flag, setting it to the quote
-                 * sign */
-                else if (*next == '\'' || *next == '\"')
-                    quoted=*next;
-                else
-                /* Proceed on the unquoted string*/
-                    unquoted++;
-                /* Proceed on the initargs string */
-                next++;
-            }
-			if (*next == ',') {
-				*unquoted=*next=0;
-				next++;
-			}
-            /* At this point , we have found a string between two commas, which may be quoted, and
-             * we have set the comma character with a NULL byte. We have also set next to the next
-             * character, to resume later on.  Standard C programs will see the initargs string as a
-             * shorter string than the input string, with only the first parameter */
-			if (*initargs != 0)
-				myputenv(&ifh,intnum,paramval,initargs);
-            /*
-             * If we have not finished the input string, we put the found parameter in the env with
-             * myputenv, and then we start all over again from next
-             * */
-			initargs=next;
-		}
-		/* load interfaces */
-        /* count the interfaces */
-		for (i=0;i<INTTYPES;i++)
-			totint+=intnum[i];
-        /* at least one */
-		if (totint==0)
-			intnum[0]=1;
-        /* For each type of interface, try to add it to the stack */
-		for (j=0;j<intnum[0];j++) {
-			if (lwip_vdeif_add(s,ifname(ifh,0,j)) == NULL) 
-				fprintf(stderr,"vunetlwip: vd[%d] configuration error\n",j);
-		}
-		for (j=0;j<intnum[1];j++) {
-			if (lwip_tunif_add(s,ifname(ifh,1,j)) == NULL)
-				fprintf(stderr,"vunetlwip: tn[%d] configuration error\n",j);
-		}
-		for (j=0;j<intnum[2];j++) {
-			if (lwip_tapif_add(s,ifname(ifh,2,j)) == NULL)
-				fprintf(stderr,"vunetlwip: tp[%d] configuration error\n",j);
-		}
-		iffree(ifh);
-
-		if (paramval[0] != NULL)
-			lwip_radv_load_configfile(s,paramval[0]);
-	}
-}
-#endif
 
 static void init_func(void *arg){
     struct stack_data *sd = (struct stack_data *) arg;
@@ -997,10 +852,9 @@ static void init_func(void *arg){
             *netmask, const ip4_addr_t *gw, void *state, netif_init_fn init, netif_input_fn input);
     int8_t (*tcpipinput)(struct pbuf *p, struct netif *inp);
     // XXX Right now only a tap interface is initialized
-    tapif_init = RESOLVE_SYM(tapif_init,err_t (*)(struct netif *),sd);
-    netif_add = RESOLVE_SYM(netif_add,struct netif *(*)(struct netif *, const ip4_addr_t *, const
-                ip4_addr_t *, const ip4_addr_t *, void *, netif_init_fn , netif_input_fn ),sd);
-    tcpipinput = RESOLVE_SYM(tcpip_input,int8_t (*)(struct pbuf *p, struct netif *inp),sd);
+    RESOLVE_SYM(tapif_init,tapif_init,sd);
+    RESOLVE_SYM(netif_add,netif_add,sd);
+    RESOLVE_SYM(tcpipinput,tcpip_input,sd);
     netif_add(sd->netif,NULL,NULL,NULL,NULL,tapif_init,tcpipinput);
 }
 
@@ -1055,8 +909,15 @@ static int vunetlwip_init(const char *source, unsigned long flags, const char *a
                 dlclose(handle);
             }
         }
-        (RESOLVE_SYM(tcpip_init,void (*)(tcpip_init_done_fn, void *),sd))(init_func,sd);
-        (RESOLVE_SYM(register_socket_event_callback, int (*)(int (*)(int, unsigned char, void*, int*), void*),sd))(update_socket_events,sd);
+
+        void (*tcpip_init)(tcpip_init_done_fn, void *);
+        RESOLVE_SYM(tcpip_init,tcpip_init,sd);
+        int (*register_socket_event_callback)(int (*)(int, unsigned char, void*, int*), void*);
+        RESOLVE_SYM(register_socket_event_callback,register_socket_event_callback,sd);
+
+        tcpip_init(init_func,sd);
+        register_socket_event_callback(update_socket_events,sd);
+
         *private_data = sd;
         return 0;
 mem_error:
@@ -1069,10 +930,14 @@ mem_error:
 
 static int vunetlwip_fini(void *private_data){
     struct stack_data *sd = private_data;
-    void (*lock)(void) = RESOLVE_SYM(sys_lock_tcpip_core,void  (*)(void),sd);
-    void (*unlock)(void) = RESOLVE_SYM(sys_unlock_tcpip_core,void  (*)(void),sd);
-    void (*netif_remove)(struct netif *) = RESOLVE_SYM(netif_remove,void (*)(struct netif *),sd);
-    struct netif *netif_list = RESOLVE_SYM(netif_list,struct netif *,sd);
+    void (*lock)(void);
+    RESOLVE_SYM(lock,sys_lock_tcpip_core,sd);
+    void (*unlock)(void);
+    RESOLVE_SYM(unlock,sys_unlock_tcpip_core,sd);
+    void (*netif_remove)(struct netif *);
+    RESOLVE_SYM(netif_remove,netif_remove,sd);
+    struct netif *netif_list;
+    RESOLVE_SYM(netif_list,netif_list,sd);
     struct netif *nip;
     struct fd_data *fdd;
     lock();
@@ -1092,28 +957,28 @@ static int vunetlwip_fini(void *private_data){
     fduserdata_destroy(sd->sockets_data);
     free(sd->netif);
     free(sd);
-	return 0;
+    return 0;
 }
 
 struct vunet_operations vunet_ops = {
-	.socket = vunetlwip_socket,
-	.bind = vunetlwip_bind,
-	.connect = vunetlwip_connect,
-	.listen = vunetlwip_listen,
-	.accept4 = vunetlwip_accept4, 
-	.getsockname = vunetlwip_getsockname,
-	.getpeername = vunetlwip_getpeername,
-	.recvmsg = vunetlwip_recvmsg,
-	.sendmsg = vunetlwip_sendmsg,
-	.setsockopt = vunetlwip_setsockopt,
-	.getsockopt = vunetlwip_getsockopt,
-	.shutdown = vunetlwip_shutdown,
+    .socket = vunetlwip_socket,
+    .bind = vunetlwip_bind,
+    .connect = vunetlwip_connect,
+    .listen = vunetlwip_listen,
+    .accept4 = vunetlwip_accept4, 
+    .getsockname = vunetlwip_getsockname,
+    .getpeername = vunetlwip_getpeername,
+    .recvmsg = vunetlwip_recvmsg,
+    .sendmsg = vunetlwip_sendmsg,
+    .setsockopt = vunetlwip_setsockopt,
+    .getsockopt = vunetlwip_getsockopt,
+    .shutdown = vunetlwip_shutdown,
     .ioctl = vunetlwip_ioctl,
-	.close = vunetlwip_close,
-	.fcntl = vunetlwip_fcntl,
+    .close = vunetlwip_close,
+    .fcntl = vunetlwip_fcntl,
     .epoll_ctl = vunetlwip_epoll_ctl,
-	.supported_domain = vunetlwip_supported_domain,
-	.supported_ioctl = vunetlwip_supported_ioctl,
-	.init = vunetlwip_init,
-	.fini = vunetlwip_fini
+    .supported_domain = vunetlwip_supported_domain,
+    .supported_ioctl = vunetlwip_supported_ioctl,
+    .init = vunetlwip_init,
+    .fini = vunetlwip_fini
 };
