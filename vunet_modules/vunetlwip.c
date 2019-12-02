@@ -377,6 +377,68 @@ int netif_netlink_setlink(void *entry, struct nlmsghdr *msg, struct nlattr **att
     return 0;
 }
 
+int netif_netlink_addlink(struct nlmsghdr *msg, struct nlattr **attr, void *stackinfo) {
+    struct stack_data *sd = (struct stack_data *) handle;
+    struct ifinfomsg *ifi=(struct ifinfomsg *)(msg+1);
+    struct netif *(*netif_add)(struct netif *netif, const ip4_addr_t *ipaddr, const ip4_addr_t
+            *netmask, const ip4_addr_t *gw, void *state, netif_init_fn init, netif_input_fn input);
+    int8_t (*tcpipinput)(struct pbuf *p, struct netif *inp);
+    int8_t (*tcpipinput)(struct pbuf *p, struct netif *inp);
+    void (*lock)(void);
+    void (*unlock)(void);
+    void (*netif_setupdown)(struct netif *);
+
+    RESOLVE_SYM(netif_add,netif_add,sd);
+    RESOLVE_SYM(tcpipinput,tcpip_input,sd);
+    RESOLVE_SYM(lock,sys_lock_tcpip_core,sd);
+    RESOLVE_SYM(unlock,sys_unlock_tcpip_core,sd);
+
+    if (attr[IFLA_INFO_KIND]) {
+        struct netif *nif;
+        netif_init_fn init_func;
+        void *state;
+
+        switch(strcase(attr[IFLA_INFO_KIND]+1))
+        {
+            case STRCASE(v,d,e):
+                init_func = vde_init;
+                state = attr[IFLA_INFO_DATA] + 1;
+                break;
+            case STRCASE(t,a,p):
+                //TODO
+                break;
+            default:
+                return -EINVAL;
+                break;
+        }
+
+        nif = (struct netif *) malloc(sizeof(struct netif));
+        if (!nip) {
+            return -ENOMEM;
+        }
+        else {
+            lock();
+            void *ret = netif_add(nif, NULL, NULL, NULL, state, init_func, tcpipinput);
+            if (!ret) {
+                free(nif);
+                unlock();
+                return -EINVAL;
+            }
+            else
+            {
+                // Adding the new nif to the netifs of the stack
+                ret->next = sd->netif;
+                sd->netif = ret->next;
+                unlock();
+                return 0;
+            }
+        }
+    }
+    else {
+        return -EINVAL;
+    }
+}
+
 int prefixlen_from_mask(uint32_t mask)
 {
     int length = 0;
@@ -678,7 +740,7 @@ int netif_netlink_deladdr(void *entry, struct nlmsghdr *msg, struct nlattr **att
 }
 
 nlq_request_handlers_table handlers_table = {
-    [RTMF_LINK]={netif_netlink_searchlink, netif_netlink_getlink, NULL/*netif_netlink_addlink*/,
+    [RTMF_LINK]={netif_netlink_searchlink, netif_netlink_getlink, netif_netlink_addlink,
         NULL /*netif_netlink_dellink*/,  netif_netlink_setlink},
     [RTMF_ADDR]={netif_netlink_searchaddr, netif_netlink_getaddr, netif_netlink_addaddr,
         netif_netlink_deladdr, NULL}
