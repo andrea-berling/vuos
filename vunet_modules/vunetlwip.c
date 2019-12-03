@@ -25,8 +25,10 @@
 #include <vpoll.h>
 #include <libnlq.h>
 #include <linux/netlink.h>
+#include <linux/rtnetlink.h>
 #include <sys/un.h>
 #include <signal.h>
+#include <strcase.h>
 
 #define NUM_SOCKETS MEMP_NUM_NETCONN
 #define LIB_LWIP "liblwip.so"
@@ -71,7 +73,11 @@
     HELPER_MACRO(netif_remove), \
     HELPER_MACRO(netif_ip6_addr_set_state), \
     HELPER_MACRO(netif_add_ip6_address), \
-    HELPER_MACRO(register_socket_event_callback)
+    HELPER_MACRO(register_socket_event_callback), \
+    HELPER_MACRO(netif_default), \
+    HELPER_MACRO(netif_set_default), \
+    HELPER_MACRO(netif_set_gw), \
+    HELPER_MACRO(vdeif_init)
 
 #define HELPER_MACRO(X) #X
 const char* lwip_sym_names[] = { VUNETLWIP_SYMBOL_LIST };
@@ -378,16 +384,17 @@ int netif_netlink_setlink(void *entry, struct nlmsghdr *msg, struct nlattr **att
 }
 
 int netif_netlink_addlink(struct nlmsghdr *msg, struct nlattr **attr, void *stackinfo) {
-    struct stack_data *sd = (struct stack_data *) handle;
+    struct stack_data *sd = (struct stack_data *) stackinfo;
     struct ifinfomsg *ifi=(struct ifinfomsg *)(msg+1);
     struct netif *(*netif_add)(struct netif *netif, const ip4_addr_t *ipaddr, const ip4_addr_t
             *netmask, const ip4_addr_t *gw, void *state, netif_init_fn init, netif_input_fn input);
     int8_t (*tcpipinput)(struct pbuf *p, struct netif *inp);
-    int8_t (*tcpipinput)(struct pbuf *p, struct netif *inp);
     void (*lock)(void);
     void (*unlock)(void);
     void (*netif_setupdown)(struct netif *);
+    err_t (*vdeif_init)(struct netif *);
 
+    RESOLVE_SYM(vdeif_init,vdeif_init,sd);
     RESOLVE_SYM(netif_add,netif_add,sd);
     RESOLVE_SYM(tcpipinput,tcpip_input,sd);
     RESOLVE_SYM(lock,sys_lock_tcpip_core,sd);
@@ -401,7 +408,7 @@ int netif_netlink_addlink(struct nlmsghdr *msg, struct nlattr **attr, void *stac
         switch(strcase(attr[IFLA_INFO_KIND]+1))
         {
             case STRCASE(v,d,e):
-                init_func = vde_init;
+                init_func = vdeif_init;
                 state = attr[IFLA_INFO_DATA] + 1;
                 break;
             case STRCASE(t,a,p):
@@ -413,12 +420,12 @@ int netif_netlink_addlink(struct nlmsghdr *msg, struct nlattr **attr, void *stac
         }
 
         nif = (struct netif *) malloc(sizeof(struct netif));
-        if (!nip) {
+        if (!nif) {
             return -ENOMEM;
         }
         else {
             lock();
-            void *ret = netif_add(nif, NULL, NULL, NULL, state, init_func, tcpipinput);
+            struct netif *ret = netif_add(nif, NULL, NULL, NULL, state, init_func, tcpipinput);
             if (!ret) {
                 free(nif);
                 unlock();
@@ -739,15 +746,97 @@ int netif_netlink_deladdr(void *entry, struct nlmsghdr *msg, struct nlattr **att
     return 0;
 }
 
+void *netif_netlink_searchroute(struct nlmsghdr *msg, struct nlattr **attr, void *handle) {
+    // XXX
+    // as of 2.12, lwip doesn't support custom destination address routing
+    // Routing for IPv4 works as follows: the interface to send the packet on, in the absence of
+    // source routing, is the one with the IP address with the longest matching address prefix; if
+    // no such interface exists, a default one is selected
+    // Routing for IPv6 is more complex, and explained in detail in the doxygen comment of the
+    // function ip6_route
+    return NULL;
+}
+
+int netif_netlink_addroute(struct nlmsghdr *msg, struct nlattr **attr, void *stackinfo) {
+    // XXX Only supports setting the default gateway for IPv4 as of right now (Tue 03 Dec 2019
+    // 10:43:11 AM CET)
+    struct stack_data *sd = (struct stack_data *) stackinfo;
+    struct rtmsg *r = (struct rtmsg*)(msg+1);
+    struct netif *netif_default;
+    void (*netif_set_gw)(struct netif *, const ip4_addr_t *);
+    void (*lock)(void);
+    void (*unlock)(void);
+
+    RESOLVE_SYM(lock,sys_lock_tcpip_core,sd);
+    RESOLVE_SYM(unlock,sys_unlock_tcpip_core,sd);
+    RESOLVE_SYM(netif_default,netif_default,sd);
+    RESOLVE_SYM(netif_set_gw,netif_set_gw,sd);
+
+    if (r->rtm_family == AF_INET)
+    {
+        if (attr[RTA_DST])
+            return -ENOTSUP;
+        else if (attr[RTA_GATEWAY])
+        {
+            ip_addr_t gw;
+
+            if (attr[RTA_GATEWAY]->nla_len == 8) {
+                memcpy(&(ip_2_ip4(&gw)->addr),(int *)(attr[RTA_GATEWAY]+1),sizeof(uint32_t));
+                lock();
+                netif_set_gw(netif_default,ip_2_ip4(&gw));
+                unlock();
+                return 0;
+            }
+            else
+                return -EINVAL;
+        }
+        else
+            return -EINVAL;
+    }
+    else
+        return -ENOTSUP;
+}
+
+int netif_netlink_getroute(void *entry, struct nlmsghdr *msg, struct nlattr **attr, struct nlq_msg
+        **reply_msgq, void *handle) {
+    // XXX only replies with deafult IPv4 gateway for now (Tue 03 Dec 2019 11:54:00 AM CET)
+    struct stack_data *sd = (struct stack_data *) handle;
+    struct rtmsg *r = (struct rtmsg*)(msg+1);
+    struct netif *netif_default;
+    void (*lock)(void);
+    void (*unlock)(void);
+
+    RESOLVE_SYM(lock,sys_lock_tcpip_core,sd);
+    RESOLVE_SYM(unlock,sys_unlock_tcpip_core,sd);
+    RESOLVE_SYM(netif_default,netif_default,sd);
+
+    struct nlq_msg *newmsg = nlq_createmsg(RTM_NEWROUTE, 0, msg->nlmsg_seq, 0);
+    nlq_addstruct(newmsg,rtmsg,
+            .rtm_family = AF_INET,
+            .rtm_scope = RT_SCOPE_UNIVERSE,
+            .rtm_type = RTN_UNICAST,
+            .rtm_table = RT_TABLE_MAIN
+            );
+    lock();
+    u8_t tmp;
+    tmp = RT_TABLE_MAIN;
+    nlq_addattr(newmsg, RTA_TABLE, &tmp, sizeof(u8_t));
+    nlq_addattr(newmsg, RTA_GATEWAY, netif_ip4_gw(netif_default), sizeof(uint32_t));
+    tmp = netif_get_index(netif_default);
+    nlq_addattr(newmsg, RTA_OIF, &tmp, sizeof(u8_t));
+    unlock();
+    nlq_complete_enqueue(newmsg, reply_msgq);
+
+    return 0;
+}
+
 nlq_request_handlers_table handlers_table = {
     [RTMF_LINK]={netif_netlink_searchlink, netif_netlink_getlink, netif_netlink_addlink,
         NULL /*netif_netlink_dellink*/,  netif_netlink_setlink},
     [RTMF_ADDR]={netif_netlink_searchaddr, netif_netlink_getaddr, netif_netlink_addaddr,
-        netif_netlink_deladdr, NULL}
-    /*
-       [RTMF_ROUTE]={ip_route_netlink_searchroute, ip_route_netlink_getroute,
-       ip_route_netlink_addroute, ip_route_netlink_delroute, NULL}
-       */
+        netif_netlink_deladdr, NULL},
+    [RTMF_ROUTE]={netif_netlink_searchroute, netif_netlink_getroute, netif_netlink_addroute, NULL
+        /*netif_netlink_delroute*/, NULL}
 };
 
 static ssize_t vunetlwip_sendto(const void *buf, size_t len, struct fd_data *fdd)
@@ -913,11 +1002,16 @@ static void init_func(void *arg){
     struct netif *(*netif_add)(struct netif *netif, const ip4_addr_t *ipaddr, const ip4_addr_t
             *netmask, const ip4_addr_t *gw, void *state, netif_init_fn init, netif_input_fn input);
     int8_t (*tcpipinput)(struct pbuf *p, struct netif *inp);
+    void (*netif_set_default)(struct netif*);
+    struct netif *ret;
     // XXX Right now only a tap interface is initialized
     RESOLVE_SYM(tapif_init,tapif_init,sd);
     RESOLVE_SYM(netif_add,netif_add,sd);
     RESOLVE_SYM(tcpipinput,tcpip_input,sd);
-    netif_add(sd->netif,NULL,NULL,NULL,NULL,tapif_init,tcpipinput);
+    RESOLVE_SYM(netif_set_default,netif_set_default,sd);
+    ret = netif_add(sd->netif,NULL,NULL,NULL,NULL,tapif_init,tcpipinput);
+    if (ret)
+        netif_set_default(ret);
 }
 
 static int update_socket_events(int s, unsigned char events, void *arg, int *err) {
@@ -959,7 +1053,7 @@ static int vunetlwip_init(const char *source, unsigned long flags, const char *a
         sd->sockets_data = fduserdata_create(EFD_TBL_SIZE);
         if (sd->sockets_data == NULL) goto mem_error;
         sd->handle = handle;
-        sd->netif = malloc(sizeof(struct netif));
+        sd->netif = calloc(1,sizeof(struct netif));
         if (!sd->netif) goto mem_error;
         for(i = 0; i < SYM_NUM; i++)
         {
