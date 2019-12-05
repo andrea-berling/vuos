@@ -1,40 +1,13 @@
-#ifndef VUNETLWIP_H
-#define VUNETLWIP_H
+#ifndef BSD2LWIP_H
+#define BSD2LWIP_H
 
-#include <lwip/netif.h>
 #include <fduserdata.h>
-#include <sys/epoll.h>
-
-int lwip_accept(int s, struct sockaddr *addr, socklen_t *addrlen);
-int lwip_bind(int s, const struct sockaddr *name, socklen_t namelen);
-int lwip_shutdown(int s, int how);
-int lwip_getpeername (int s, struct sockaddr *name, socklen_t *namelen);
-int lwip_getsockname (int s, struct sockaddr *name, socklen_t *namelen);
-int lwip_getsockopt (int s, int level, int optname, void *optval, socklen_t *optlen);
-int lwip_setsockopt (int s, int level, int optname, const void *optval, socklen_t optlen);
- int lwip_close(int s);
-int lwip_connect(int s, const struct sockaddr *name, socklen_t namelen);
-int lwip_listen(int s, int backlog);
-ssize_t lwip_recv(int s, void *mem, size_t len, int flags);
-ssize_t lwip_read(int s, void *mem, size_t len);
-ssize_t lwip_readv(int s, const struct iovec *iov, int iovcnt);
-ssize_t lwip_recvfrom(int s, void *mem, size_t len, int flags,
-      struct sockaddr *from, socklen_t *fromlen);
-ssize_t lwip_recvmsg(int s, struct msghdr *message, int flags);
-ssize_t lwip_send(int s, const void *dataptr, size_t size, int flags);
-ssize_t lwip_sendmsg(int s, const struct msghdr *message, int flags);
-ssize_t lwip_sendto(int s, const void *dataptr, size_t size, int flags,
-    const struct sockaddr *to, socklen_t tolen);
-int lwip_socket(int domain, int type, int protocol);
-ssize_t lwip_write(int s, const void *dataptr, size_t size);
-ssize_t lwip_writev(int s, const struct iovec *iov, int iovcnt);
-int lwip_ioctl(int s, long cmd, void *argp);
-int lwip_fcntl(int s, int cmd, int val);
-
-err_t vdeif_init(struct netif *netif);
-err_t tapif_init(struct netif *netif);
+#include <lwip_symbols.h>
 
 #define netif_get_index(netif)      ((u8_t)((netif)->num + 1))
+
+// XXX This has been taken literally from port/unix/lwiopts.h
+#define MEMP_NUM_NETCONN               32
 
 #define NUM_SOCKETS MEMP_NUM_NETCONN
 #define LIB_LWIP "liblwip.so"
@@ -75,8 +48,7 @@ err_t tapif_init(struct netif *netif);
 #define RETSYM2(sym,source) _RETSYM3(sym,sym,source,false)
 #define RETSYM3(newsym,symname,source) _RETSYM3(newsym,symname,source,true)
 
-#define REDIRECT_TO_LWIP(sockfd,syscall,...) {\
-    struct stack_data *sd = vunet_get_private_data(); \
+#define REDIRECT_TO_LWIP(sd,sockfd,syscall,...) {\
     struct fd_data *fdd = fduserdata_get(sd->sockets_data,sockfd); \
     int lwipfd = fdd->fd; \
     int ret = 0; \
@@ -159,9 +131,37 @@ struct stack_data {
 };
 
 struct fd_data {
-    struct epoll_event ev;      // Events virtualized processes are waiting on
     int fd;                     // lwip socket fd; if < 0, this is a netlink socket
     struct nlq_msg *msgq;       // Queue of Netlink messages for stack configuration
 };
 
-#endif /* VUNETLWIP_H */
+typedef void (*init_func_t)(void *);
+
+struct init_arg {
+    struct stack_data *sd;
+    void *arg;
+};
+
+int bsd2lwip_socket(struct stack_data *sd, int domain, int type, int protocol);
+int bsd2lwip_bind(struct stack_data *sd, int sockfd, const struct sockaddr *addr, socklen_t addrlen);
+int bsd2lwip_connect(struct stack_data *sd, int sockfd, const struct sockaddr *addr, socklen_t addrlen);
+int bsd2lwip_listen(struct stack_data *sd, int sockfd, int backlog);
+int bsd2lwip_accept4(struct stack_data *sd, int sockfd, struct sockaddr *addr, socklen_t *addrlen, int flags);
+int bsd2lwip_getsockname(struct stack_data *sd, int sockfd, struct sockaddr *addr, socklen_t *addrlen);
+int bsd2lwip_getpeername(struct stack_data *sd, int sockfd, struct sockaddr *addr, socklen_t *addrlen);
+ssize_t bsd2lwip_recvfrom(void *buf, size_t len, int flags, struct sockaddr *from, socklen_t
+        *fromlen, struct fd_data *fdd, int fd);
+ssize_t bsd2lwip_recvmsg(struct stack_data *sd, int sockfd, struct msghdr *msg, int flags);
+ssize_t bsd2lwip_sendto(struct stack_data *sd, const void *buf, size_t len, struct fd_data *fdd, int fd);
+ssize_t bsd2lwip_sendmsg(struct stack_data *sd, int sockfd, const struct msghdr *msg, int flags);
+int bsd2lwip_setsockopt(struct stack_data *sd, int sockfd, int level, int optname, const void *optval, socklen_t optlen);
+int bsd2lwip_getsockopt(struct stack_data *sd, int sockfd, int level, int optname, void *optval, socklen_t *optlen);
+int bsd2lwip_shutdown(struct stack_data *sd, int sockfd, int how);
+int bsd2lwip_ioctl(struct stack_data *sd, int s, unsigned long cmd, void *argp);
+int bsd2lwip_close(struct stack_data *sd, int fd);
+int bsd2lwip_fcntl(struct stack_data *sd, int s, int cmd, long val);
+void add_tap(void *arg);
+struct stack_data *bsd2lwip_newstack(init_func_t init_func, void *arg);
+int bsd2lwip_delstack(struct stack_data *sd);
+
+#endif // BSD2LWIP_H
