@@ -1,12 +1,11 @@
-#include <vunetlwip.h>
+#include <lwip_symbols.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <libnlq.h>
 #include <lwip/tcpip.h>
 #include <linux/if.h>
 #include <strcase.h>
-
-extern const char *lwip_sym_names;
+#include <bsd2lwip.h>
 
 void *netif_netlink_searchlink(struct nlmsghdr *msg, struct nlattr **attr, void *handle) {
     struct stack_data *sd = (struct stack_data *) handle;
