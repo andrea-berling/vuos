@@ -14,4 +14,9 @@ foreach(VUNET_MOD ${VUNET_MODULES})
 endforeach(VUNET_MOD)
 
 target_link_libraries(vunetvdestack vdeplug)
-add_subdirectory(vunetlwip)
+
+include(FindPkgConfig)
+pkg_check_modules(LWIP liblwip)
+target_include_directories(vunetlwip PRIVATE /usr/include/lwip)
+
+target_link_libraries(vunetlwip bsd2lwip)
